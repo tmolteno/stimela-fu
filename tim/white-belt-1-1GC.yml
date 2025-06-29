@@ -1,0 +1,831 @@
+#!/usr/bin/env -S stimela run
+# Author. Tim Molteno tim@elec.ac.nz
+# This is a white-belt level Stimela 2.0 processing pipeline
+# to do first-generation calibration (flux and bandass) for
+# MeerKAT radio telescope data.
+
+opts:
+    log:
+        dir: logs/log-{config.run.datetime}
+        name: log-{info.fqname}
+        nest: 2
+        symlink: log
+    backend:
+        slurm:
+            srun_opts:
+                mem: 64G
+                cpus-per-task: 4
+
+# include cab definitions
+_include:
+    - (cultcargo):
+          - wsclean.yml
+          - quartical.yml
+          - tricolour.yml
+          - shadems.yml
+          - crystalball.yml
+          - casa:
+                - flag.yml
+                - listobs.yml
+                - bandpass.yml
+                - calibration.yml
+                - split.yml
+                - setjy.yml
+                - plotms.yml
+                - clearcal.yml
+                - mstransform.yml
+    - tcam-cabs.yml
+    - shadems-tim.yml
+_scrub:
+    - lib.misc.casa6.command-data.backend.singularity.bind_dirs.dot-casa
+
+
+cal-loop-secondaries-g2:
+    info: "Apply stage two over secondary calibrators"
+    inputs:
+        ms: MS
+        phase-calibrators: List[str]
+        uvrange: str
+        spw: str
+        reference-ant: str
+        bpcal: str
+    for_loop:
+        var: pcal
+        over: phase-calibrators
+    steps:
+        secondary-g2:
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.pcal
+                uvrange: =recipe.uvrange
+                spw: =recipe.spw
+                caltable: "{root.dir-out}/multi.G2"
+                refant: =recipe.reference-ant
+                minblperant: 4.0
+                minsnr: 3.0
+                solint: "inf"
+                solnorm: false
+                gaintype: "G"
+                combine: ""
+                calmode: "ap"
+                parang: false
+                gaintable: ["{root.dir-out}/multi.K1", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1"]
+                gainfield: [=recipe.bpcal, =recipe.bpcal, =recipe.bpcal]
+                interp: ["nearest", "linear", "linear"]
+                append: true
+
+        secondary-k2:
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.pcal
+                # uvrange: =recipe.uvrange
+                # spw: =recipe.spw
+                caltable: "{root.dir-out}/multi.K2"
+                refant: =recipe.reference-ant
+                gaintype: "K"
+                solint: "inf"
+                solnorm: false
+                parang: false
+                gaintable: ["{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1", "{root.dir-out}/multi.G2"]
+                gainfield: =LIST(recipe.bpcal,recipe.bpcal,recipe.pcal)
+                interp: ["nearest", "linear", "linear"]
+                append: true
+
+cal-loop-secondaries-applycal:
+    info: "this runs K2, G1, B1, F2 over secondary calibrators"
+    inputs:
+        ms: MS
+        phase-calibrators: List[str]
+        bpcal: str
+    for_loop:
+        var: pcal
+        over: phase-calibrators
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+        secondary-k2-g1-b1-f2:
+            cab: casa.applycal
+            info: Correct secondaries with K2, G1, B1, F2
+            params:
+                ms: =recipe.ms
+                gaintable: ["{root.dir-out}/multi.K2", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1", "{root.dir-out}/multi.F2"]
+                field: =recipe.pcal
+                gainfield: =LIST('','',recipe.bpcal,recipe.pcal)
+                interp: [nearest, linear, linear, linear]
+                parang: false
+
+        secondary-rflag:
+            info: "Flag secondary on CORRECTED_DATA-MODEL_DATA using rflag"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                field: =recipe.pcal
+                mode: rflag
+                datacolumn: "residual"
+                action: apply
+
+        secondary-tfcrop:
+            info: "Flag secondary on CORRECTED_DATA-MODEL_DATA using tfcrop"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                field: =recipe.pcal
+                mode: tfcrop
+                datacolumn: "residual"
+                action: apply
+
+cal-loop-secondaries-g3:
+    info: "perform stage 3 over secondary calibrators"
+    inputs:
+        ms: MS
+        phase-calibrators: List[str]
+        uvrange: str
+        spw: str
+        reference-ant: str
+        bpcal: str
+    for_loop:
+        var: pcal
+        over: phase-calibrators
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+        secondary-g3:
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.pcal
+                uvrange: =recipe.uvrange
+                spw: =recipe.spw
+                caltable: "{root.dir-out}/multi.G3"
+                refant: =recipe.reference-ant
+                minblperant: 4.0
+                minsnr: 3.0
+                solint: "inf"
+                solnorm: false
+                gaintype: "G"
+                combine: ""
+                calmode: "ap"
+                parang: false
+                gaintable: ["{root.dir-out}/multi.K2", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1"]
+                gainfield: [=recipe.bpcal, =recipe.bpcal, =recipe.bpcal]
+                interp: ["nearest", "linear", "linear"]
+                append: true
+
+        secondary-k3:
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.pcal
+                # uvrange: =recipe.uvrange
+                # spw: =recipe.spw
+                caltable: "{root.dir-out}/multi.K3"
+                refant: =recipe.reference-ant
+                gaintype: "K"
+                solint: "inf"
+                parang: false
+                gaintable: ["{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1", "{root.dir-out}/multi.G3"]
+                gainfield: =LIST(recipe.bpcal,recipe.bpcal,recipe.pcal)
+                interp: ["linear", "linear", "linear"]
+                append: true
+
+cal-loop-secondaries-apply-final:
+    info: "this applies final cal to secondary calibrators"
+    inputs:
+        ms: MS
+        phase-calibrators: List[str]
+        uvrange: str
+        spw: str
+        reference-ant: str
+        bpcal: str
+    for_loop:
+        var: pcal
+        over: phase-calibrators
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+        secondary-k3-g1-b1-f3:
+            cab: casa.applycal
+            info: Correct secondaries with K3, G1, B1, F3
+            params:
+                ms: =recipe.ms
+                gaintable: ["{root.dir-out}/multi.K3", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1", "{root.dir-out}/multi.F3"]
+                field: =recipe.pcal
+                gainfield: =LIST('','',recipe.bpcal,recipe.pcal)
+                interp: [nearest, linear, linear, linear]
+                parang: false
+
+loop-targets-apply-cal:
+    info: "Apply final tables to targets"
+    inputs:
+        ms: MS
+        targets: List[str]
+        target-pcal-map: List[str]
+        target-indices: List[int]
+        bpcal: str
+    assign:
+        ms-root: =BASENAME(recipe.ms)
+        _include_post: white-belt-image-names.yml
+
+    for_loop:
+        var: index
+        over: target-indices
+    steps:
+        target-k3-g1-b1-f3:
+            cab: casa.applycal
+            info: Correct targets with K3, G1, B1, F3
+            params:
+                ms: =recipe.ms
+                gaintable: ["{root.dir-out}/multi.K3", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1", "{root.dir-out}/multi.F3"]
+                field: =recipe.target-name
+                gainfield: =LIST('','',recipe.bpcal,recipe.target-pcal-map[recipe.index])
+                interp: [nearest, linear, linear, linear]
+                parang: false
+
+cal-loop-targets-split:
+    info: "split the targets"
+    inputs:
+        ms: MS
+        dir-out: str
+        targets: List[str]
+        target-indices: List[int]
+    assign:
+        ms-root: =BASENAME(recipe.ms)
+        _include_post: white-belt-image-names.yml
+
+    for_loop:
+        var: index
+        over: target-indices
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+        target-split:
+            cab: casa.mstransform
+            info: Split target
+            params:
+                ms: =recipe.ms
+                outputvis: =recipe.target-ms
+                field: =recipe.target-name
+                usewtspectrum: true
+                realmodelcol: true
+                datacolumn: corrected
+                keepflags: true
+
+cal-loop-plot-gains:
+    info: "plot the gains"
+    inputs:
+        dir-out: str
+        gain-tables: List[str]
+    for_loop:
+        var: caltable
+        over: gain-tables
+    steps:
+        plot-gains:
+            skip: false
+            info: Plot Gain Cal
+            cab: casa.plotms
+            params:
+                ms: "{root.dir-out}/multi.{recipe.caltable}"
+                plotfile: "{recipe.dir-out}/cal_{recipe.caltable}.pdf"
+                overwrite: true
+
+
+
+calibration-1gc:
+    info: "A recipe for 1GC calibration of MeerKAT telescope data"
+
+    inputs:
+        ms:
+            dtype: MS
+            required: true
+            info: "MeerKAT measurement set after 1GC"
+        bpcal:
+            dtype: str
+            required: true
+        outname:
+            dtype: str
+            info: Output directory name
+            required: true
+        phasecal-list:
+            dtype: List[str]
+            required: true
+        target-pcal-map:
+            dtype: List[str]
+            required: true
+        target-list:
+            dtype: List[str]
+            required: true
+        reference-ant:
+            dtype: str
+            default: "m002"
+            info: "reference antenna"
+
+    _include: white-belt-setup.yml
+
+    assign_based_on:
+        _include: white-belt-config.yml
+
+    assign:
+        num-targets: =LEN(recipe.target-list)
+
+    steps:
+        clearcal:
+            info: Clear calibration
+            cab: casa.clearcal
+            params:
+                ms: =recipe.ms
+                addmodel: true
+
+        listobs:
+            info: Look at the fields
+            cab: casa.listobs
+            params:
+                ms: =recipe.ms
+
+        flux-density-cal-1934:
+            info: Absolute flux density calibration
+            skip: true
+            cab: casa.setjy
+            params:
+                ms: =recipe.ms
+                standard: "Stevens-Reynolds 2016"
+                field: =recipe.bpcal
+                usescratch: true
+                scalebychan: true
+
+        flux-density-cal-0408:
+            info: Absolute flux density calibration
+            cab: casa.setjy
+            params:
+                ms: =recipe.ms
+                standard: "manual"
+                field: =recipe.bpcal
+                fluxdensity: [17.066, 0.0, 0.0, 0.0]
+                spix: [-1.179]
+                reffreq: "1284MHz"
+                usescratch: true
+                scalebychan: true
+
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------- STAGE 0 --------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+
+        # ------- K0 (primary)
+        primary-K0:
+            info: K0 (primary)
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                caltable: "{root.dir-out}/multi.K0"
+                gaintype: K
+                field: =recipe.bpcal
+                solint: inf
+                # uvrange: =recipe.cal-1gc.uvrange
+                refant: =recipe.reference-ant
+
+        primary-plot-K0:
+            skip: false
+            info: Plot Gain Cal
+            cab: casa.plotms
+            params:
+                ms: "{root.dir-out}/multi.K0"
+                plotfile: "{recipe.dir-out}/cal_K0.pdf"
+                overwrite: true
+
+        # ------- G0 (primary)
+        # https://github.com/IanHeywood/oxkat/blob/master/oxkat/1GC_07_casa_get_secondary_model.py
+
+        primary-G0:
+            info: G0 (primary; apply K0)
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                caltable: "{root.dir-out}/multi.G0"
+                field: =recipe.bpcal
+                uvrange: =recipe.cal-1gc.uvrange
+                refant: =recipe.reference-ant
+                gaintype: G
+                solint: inf
+                calmode: p
+                minsnr: 5.0
+                gainfield: [=recipe.bpcal]
+                gaintable: ['{root.dir-out}/multi.K0']
+                interp: [nearest]
+
+        primary-plot-G0:
+            skip: false
+            info: Plot Gain Cal
+            cab: casa.plotms
+            params:
+                ms: "{root.dir-out}/multi.G0"
+                plotfile: "{recipe.dir-out}/cal_G0.pdf"
+                overwrite: true
+
+        primary-B0:
+            info: Bandpass B0 (primary, apply K0, G0)
+            cab: casa.bandpass
+            params:
+                ms: =recipe.ms
+                caltable: "{root.dir-out}/multi.B0"
+                field: =recipe.bpcal
+                uvrange: =recipe.cal-1gc.uvrange
+                refant: =recipe.reference-ant
+                solint: inf
+                combine: ''
+                solnorm: false
+                minblperant: 4
+                minsnr: 3.0
+                bandtype: "B"
+                fillgaps: =recipe.cal-1gc.gapfill
+                parang: false
+                gainfield: [=recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest]
+                gaintable: ["{root.dir-out}/multi.K0", "{root.dir-out}/multi.G0"]
+
+        flag-cparam-primary-tfcrop:
+            info: "Flag primary on CPARAM using tfcrop"
+            cab: casa.flagdata
+            params:
+                ms: "{root.dir-out}/multi.B0"
+                mode: tfcrop
+                datacolumn: "CPARAM"
+                action: apply
+
+        flag-cparam-primary-rflag:
+            info: "Flag primary on CPARAM using rflag"
+            cab: casa.flagdata
+            params:
+                ms: "{root.dir-out}/multi.B0"
+                mode: rflag
+                datacolumn: "CPARAM"
+                action: apply
+
+        correct-primary-data:
+            info: Correct primary data with K0,B0,G0
+            cab: casa.applycal
+            params:
+                ms: =recipe.ms
+                gaintable: ["{root.dir-out}/multi.K0", "{root.dir-out}/multi.G0", "{root.dir-out}/multi.B0"]
+                field: =recipe.bpcal
+                gainfield: [=recipe.bpcal, =recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest, nearest]
+                # calwt: [false]
+                parang: false
+
+        flag-corrected-primary-rflag:
+            info: "Flag primary on CORRECTED_DATA - MODEL_DATA using rflag"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: rflag
+                field: =recipe.bpcal
+                datacolumn: "residual"
+                action: apply
+
+        flag-corrected-primary-tfcrop:
+            info: "Flag primary on CORRECTED_DATA - MODEL_DATA using tfcrop"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: tfcrop
+                field: =recipe.bpcal
+                datacolumn: "residual"
+                action: apply
+
+        flag-corrected-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: "bpcal_residual_flags"
+
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------- STAGE 1 --------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+
+        # ------- K1 (primary; apply B0, G0)
+
+        primary-k1-cal:
+            info: K1 (primary; apply B0, G0)
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.bpcal
+                caltable: "{root.dir-out}/multi.K1"
+                refant: =recipe.reference-ant
+                gaintype: K
+                solint: inf
+                parang: false
+                gaintable: ["{root.dir-out}/multi.B0", "{root.dir-out}/multi.G0"]
+                gainfield: [=recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest]
+
+        # ------- G1 (primary; apply K1, B0)
+
+        primary-G1-cal-apply-1:
+            info: G1 (primary; apply K1, B0)
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.bpcal
+                caltable: "{root.dir-out}/multi.G1"
+                refant: =recipe.reference-ant
+                uvrange: =recipe.cal-1gc.uvrange
+                gaintype: "G"
+                solint: "inf"
+                calmode: "p"
+                minsnr: 5.0
+                gainfield: [=recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest]
+                gaintable: ["{root.dir-out}/multi.K1", "{root.dir-out}/multi.B0"]
+
+        primary-B1:
+            info: Bandpass B1 (primary, apply K1, G1)
+            cab: casa.bandpass
+            params:
+                ms: =recipe.ms
+                field: =recipe.bpcal
+                caltable: "{root.dir-out}/multi.B1"
+                uvrange: =recipe.cal-1gc.uvrange
+                refant: =recipe.reference-ant
+                solint: "inf"
+                combine: ""
+                solnorm: false
+                minblperant: 4
+                minsnr: 3.0
+                bandtype: "B"
+                fillgaps: =recipe.cal-1gc.gapfill
+                gainfield: [=recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest]
+                gaintable: ["{root.dir-out}/multi.K1", "{root.dir-out}/multi.G1"]
+                parang: false
+
+        # flagdata(vis=bptab1,mode='tfcrop',datacolumn='CPARAM')
+        # flagdata(vis=bptab1,mode='rflag',datacolumn='CPARAM')
+
+        flag-bp1-tfcrop:
+            info: "Flag multi.B1 on CPARAM using tfcrop"
+            cab: casa.flagdata
+            params:
+                ms: "{root.dir-out}/multi.B1"
+                mode: tfcrop
+                datacolumn: "CPARAM"
+                action: apply
+        flag-bp1-rflag:
+            info: "Flag multi.B1 on CPARAM using rflag"
+            cab: casa.flagdata
+            params:
+                ms: "{root.dir-out}/multi.B1"
+                mode: rflag
+                datacolumn: "CPARAM"
+                action: apply
+
+        # ------- Correct primary data with K1,G1,B1
+        correct-primary-1:
+            info: Correct primary data with K1,G1,B1
+            cab: casa.applycal
+            params:
+                ms: =recipe.ms
+                gaintable: ["{root.dir-out}/multi.K1", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1"]
+                field: =recipe.bpcal
+                gainfield: [=recipe.bpcal, =recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest, nearest]
+
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------- STAGE 2 --------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+
+        # ------- G2 (primary; a&p sols per scan / SPW)
+        primary-G2:
+            info: G2 (primary; a&p sols per scan / SPW)
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.bpcal
+                uvrange: =recipe.cal-1gc.uvrange
+                spw: =recipe.cal-1gc.freqrange
+                caltable: "{root.dir-out}/multi.G2"
+                refant: =recipe.reference-ant
+                solint: inf
+                solnorm: false
+                combine: ""
+                minsnr: 3.0
+                calmode: "ap"
+                parang: false
+                gaintable: ["{root.dir-out}/multi.K1", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1"]
+                gainfield: [=recipe.bpcal, =recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest, nearest]
+                append: false
+
+        duplicate-k1:
+            cab: copy
+            params:
+                src: "{root.dir-out}/multi.K1"
+                dest: "{root.dir-out}/multi.K2"
+
+        # 1GC_casa_refcal.py "looping over secondaries"
+
+        loop-secondaries-g2:
+            info: This step runs cal-loop-secondaries over the list of secondary calibrators
+            recipe: cal-loop-secondaries-g2
+            params:
+                ms: =recipe.ms
+                phase-calibrators: =recipe.phasecal-list
+                uvrange: =recipe.cal-1gc.uvrange
+                spw: =recipe.cal-1gc.freqrange
+                reference-ant: =recipe.reference-ant
+                bpcal: =recipe.bpcal
+
+        secondary-f2:
+            cab: casa.fluxscale
+            params:
+                ms: =recipe.ms
+                caltable: "{root.dir-out}/multi.G2"
+                fluxtable: "{root.dir-out}/multi.F2"
+                reference: =recipe.bpcal
+                append: false
+                transfer: [""]
+
+        loop-applycal-step2:
+            info: This step runs K2,G1 followed by flagging over the list of secondary calibrators
+            recipe: cal-loop-secondaries-applycal
+            params:
+                ms: =recipe.ms
+                phase-calibrators: =recipe.phasecal-list
+                bpcal: =recipe.bpcal
+
+        flag-secondary-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: "pcal_residual_flags"
+
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------- STAGE 3 --------------------------- #
+        # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+        primary-G3:
+            info: G3 (primary; a&p sols per scan / SPW)
+            cab: casa.gaincal
+            params:
+                ms: =recipe.ms
+                field: =recipe.bpcal
+                uvrange: =recipe.cal-1gc.uvrange
+                spw: =recipe.cal-1gc.freqrange
+                caltable: "{root.dir-out}/multi.G3"
+                refant: =recipe.reference-ant
+                solint: inf
+                solnorm: false
+                combine: ""
+                minsnr: 3.0
+                calmode: "ap"
+                parang: false
+                gaintable: ["{root.dir-out}/multi.K2", "{root.dir-out}/multi.G1", "{root.dir-out}/multi.B1"]
+                gainfield: [=recipe.bpcal, =recipe.bpcal, =recipe.bpcal]
+                interp: [nearest, nearest, nearest]
+                append: false
+
+        duplicate-k1-2:
+            cab: copy
+            params:
+                src: "{root.dir-out}/multi.K1"
+                dest: "{root.dir-out}/multi.K3"
+
+        loop-secondaries-g3:
+            info: This step runs cal-loop-secondaries over the list of secondary calibrators
+            recipe: cal-loop-secondaries-g3
+            params:
+                ms: =recipe.ms
+                phase-calibrators: =recipe.phasecal-list
+                uvrange: =recipe.cal-1gc.uvrange
+                spw: =recipe.cal-1gc.freqrange
+                reference-ant: =recipe.reference-ant
+                bpcal: =recipe.bpcal
+
+        secondary-f3:
+            cab: casa.fluxscale
+            params:
+                ms: =recipe.ms
+                caltable: "{root.dir-out}/multi.G3"
+                fluxtable: "{root.dir-out}/multi.F3"
+                reference: =recipe.bpcal
+                append: false
+                transfer: =recipe.phasecal-list
+
+        # ------- Apply final tables to secondaries
+        loop-secondaries-apply-final:
+            info: This step applies the final cal tables to secondary calibrators
+            recipe: cal-loop-secondaries-apply-final
+            params:
+                ms: =recipe.ms
+                phase-calibrators: =recipe.phasecal-list
+                uvrange: =recipe.cal-1gc.uvrange
+                spw: =recipe.cal-1gc.freqrange
+                reference-ant: =recipe.reference-ant
+                bpcal: =recipe.bpcal
+
+        loop-targets-apply-final:
+            info: This step applies the final cal tables to targetss
+            recipe: loop-targets-apply-cal
+            params:
+                ms: =recipe.ms
+                targets: =recipe.target-list
+                target-indices: =RANGE(recipe.num-targets)
+                target-pcal-map: =recipe.target-pcal-map
+                bpcal: =recipe.bpcal
+
+        flag-target-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: "refcal-full"
+
+        ########################################################################
+        #
+        #       SPLIT THE TARGETS OFF
+        #
+        ########################################################################
+
+        loop-targets-split:
+            info: This step splits the targets
+            recipe: cal-loop-targets-split
+            params:
+                ms: =recipe.ms
+                dir-out: =recipe.dir-out
+                targets: =recipe.target-list
+                target-indices: =RANGE(recipe.num-targets)
+
+        flag-final-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname:
+                    "post-1gc"
+
+        ########################################################################
+        #
+        #       Plot the gain tables using ragavi-gains (or plotms)
+        #
+        ########################################################################
+
+        plot-gains:
+            skip: false
+            info: Plot Gain Caltables
+            recipe: cal-loop-plot-gains
+            params:
+                gain-tables: [G0, G1, G2, G3, K0, K1, K2, K3, B0, B1, F2, F3]
+                dir-out: =recipe.dir-out
+
+        ########################################################################
+        #
+        #   Sanity Check 1:
+        #   Build a source model of the primary flux calibrator
+        #   and check that it is consistent with the original model.
+        #
+        ########################################################################
+        bpcal-split:
+            cab: casa.mstransform
+            info: Split primary flux calibrator
+            params:
+                ms: =recipe.ms
+                outputvis: "{recipe.dir-out}/bpcal_{recipe.ms-root}"
+                field: =recipe.bpcal
+                usewtspectrum: true
+                realmodelcol: true
+                datacolumn: corrected
+                keepflags: true
+
+        sanity-check-1:
+            info: "make an image of the flux calibrator"
+            _use: lib.steps.imaging-standard
+            cab: wsclean
+            params:
+                ms: =previous.outputvis
+                prefix: "{recipe.dir-out}/{recipe.outname}-sanity-1"
+                column: DATA
+                save-source-list: true
+
+        plot-results-1:
+            cab: shadems-tim
+            info: 'shadems --xaxis CORRECTED_DATA:real,uv --yaxis CORRECTED_DATA:imag,CORRECTED_DATA:amp --field 0,2 --corr XX,YY --iter-field <msname>'
+            params:
+                ms: =recipe.ms
+                dir: =recipe.dir-out
+                col: CORRECTED_DATA
+                cnum: 100  # up 100 colours
+                iter-field: true
+                xaxis: 'CORRECTED_DATA:real,UV'
+                yaxis: 'CORRECTED_DATA:imag,CORRECTED_DATA:amp'
+                corr: [XX,YY]
+
