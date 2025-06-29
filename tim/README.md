@@ -2,7 +2,7 @@
 
 Based on a mixture of oxcat (Ian Heywood) and some more modern tools like Quartical. This is a reasonably automated stimela2 pipeline. It includes some cab definitions yet to go into cult-cargo.
 
-## How to use
+## What's in here
 
 The script consists of five steps.
 
@@ -13,3 +13,12 @@ The script consists of five steps.
 * 3GC Using DDFacet and KillMS. white-belt-4-3GC.yml
 
 These can be run using the supplied Makefile
+
+There are also some configuration files:
+
+* white-belt-config.yml
+* white-belt-setup.yml
+
+### Beams
+
+In the folder called beams is a script for building beams. This needs to be done only once on the imaging machine.
