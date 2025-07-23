@@ -1,0 +1,332 @@
+#!/usr/bin/env -S stimela run
+# Author. Tim Molteno tim@elec.ac.nz
+# White belt script for 3GC using DDFacet
+
+opts:
+    log:
+        dir: logs/log-{config.run.datetime}
+        name: log-{info.fqname}
+        nest: 2
+        symlink: log
+
+# include cab definitions
+_include:
+    - (cultcargo):
+        - wsclean.yml
+        - bdsf.yml
+    - tcam-cabs.yml
+    - ddfacet.yml
+
+cal-loop-targets-3gc:
+    info: "Loop Direction-dependent self-cal on targets"
+    inputs:
+        ms: MS
+        targets: List[str]
+        target-indices: List[int]
+    assign:
+        ms-root: =BASENAME(recipe.ms)
+        _include_post: white-belt-image-names.yml
+
+        stamp: 'tstamp'
+
+        ddf-img-prefix: "{recipe.target-prefix}_DDFpcal"
+        kms-img-prefix: "{recipe.target-prefix}_DDFkMS"
+
+        k-outname: 'delaycal_{recipe.target-name}_{recipe.stamp}'
+        k-outdir: "{recipe.k-outname}.cc"
+        k-saveto: "{recipe.k-outname}.parmdb"
+        zoomed-target-fits-make: "foobar"
+        ddfacet-region-file: =root.facet_centres
+
+    for_loop:
+        var: index
+        over: target-indices
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+
+        create-cache:
+            cab: mkdirs
+            params:
+                dir: =root.ddf-cache
+
+        estimate-npix:
+            cab: ddfacet-get-npix
+            skip: false
+            params:
+                NPixIn: =root.image-size
+                Padding: 1
+
+        ## Create an image from which to make facets
+
+
+        # DDF.py --Data-MS <YourData.ms/txt> --Data-ColName CORRECTED_DATA
+        #         --Output-Name image_DI --Image-Cell 1.5 --Image-NPix 6000
+        #         --Output-Mode Dirty --Facets-DiamMin 0.03 --Facets-DiamMax 0.3
+        #         --Parallel-NCPU 96 --Data-ChunkHours 2
+        #         --Freq-NBand 3 --Freq-NDegridBand 10
+        #         --Beam-Model FITS  --Beam-NBand 20 --Beam-FITSParAngleIncDeg 0.5
+        #         --Beam-FITSFile='/SomePath/meerkat_pb_jones_cube_95channels_$(xy)_$(reim).fits'
+        #         --Beam-CenterNorm 1 --Beam-FITSFeed xy --Beam-FITSFeedSwap 1 --Beam-ApplyPJones 1 --Beam-FlipVisibilityHands 1 --RIME-DecorrMode FT
+
+        ddfacet-target:
+            info: "Run DDFacet, masked deconvolution of CORRECTED_DATA column of {recipe.target-name}"
+            _use: lib.steps.ddfacet.base
+            skip: false
+            params:
+                Data.MS: =recipe.target-ms
+                Data.ColName: CORRECTED_DATA
+                Output:
+                    Name: =recipe.ddf-img-prefix
+                Image.NPix: =steps.estimate-npix.NPixOut
+                Cache:
+                    Reset: true
+                # Mask:
+                #     Auto: false
+                #     External: =recipe.mask-ddf-image
+                # Comp.Sparsification: '30, 2'
+
+        ## If using a manual model, create a region file from the above image. Then pass it into the recipe
+        make-catalogue-manual:
+            cab: ddf_makemodel
+            info: Convert DS9 region file to numpy
+            skip: =root.auto-ddf-mask
+            params:
+                ds9PreClusterFile: =recipe.ddfacet-region-file
+                BaseImageName: =recipe.ddf-img-prefix
+                NCluster: 0
+
+        cluster-sky-manual:
+            cab: clustercat
+            skip: =root.auto-ddf-mask
+            params:
+                SourceCat: =previous.outfile_srl
+                NCluster: =root.auto-ddf-cluster-count
+                OutClusterCat: '{recipe.ddf-img-prefix}.ClusterCat.npy'
+
+        ## Create an automitic model
+        make-catalogue-bdsf:
+            info: Create a catalogue of the image using BDSF. This will be clustered
+            cab: bdsf.catalog
+            skip: =not(root.auto-ddf-mask)
+            params:
+                image: =steps.ddfacet-target.app_restored_mfs
+                thresh_pix: 5.0
+                thresh_isl: 3.0
+                catalog_format: fits
+                outfile_srl: '{recipe.ddf-img-prefix}.app.restored.fits.srl'
+                outfile_gaul: '{recipe.ddf-img-prefix}.app.restored.fits.gaul'
+
+        cluster-sky-model:
+            cab: clustercat
+            skip: =not(root.auto-ddf-mask)
+            params:
+                SourceCat: =previous.outfile_srl
+                NCluster: =root.auto-ddf-cluster-count
+                OutClusterCat: '{recipe.ddf-img-prefix}.ClusterCat.npy'
+                NCPU: 6
+
+
+        # https://github.com/saopicc/DDFacet/wiki/Creating-a-MeerKAT-DD-corrected-intrinsic-flux-image-with-DDF-kMS
+        # DDF.py image_DI.parset
+        #           --Name image_DI_Clustered --Output-Mode Clean
+        #           --Facets-CatNodes ds9.reg.ClusterCat.npy
+        #           --Deconv-Mode SSD2 --SSD2-PolyFreqOrder 3 --Deconv-MaxMajorIter 2
+        #           --Mask-Auto 1
+        inital-masked-deconvolution:
+            cab: ddfacet
+            skip: false
+            info: Do an initial deconvolution with SSD2/automasking/clustering
+            params:
+                parset: =steps.ddfacet-target.parset_out
+                Output.Name: '{recipe.ddf-img-prefix}_clustered'
+                Output.Mode: Clean
+                Facets.CatNodes: =steps.cluster-sky-model.OutClusterCat
+                Cache:
+                    Reset: true
+                Deconv:
+                    Mode: HMP
+                    MaxMajorIter: 2
+                SSD2.PolyFreqOrder: 3
+                Mask:
+                    Auto: true
+
+        # MakeMask.py --RestoredIm image_DI_Clustered.app.restored.fits --Th 5
+        # Create an external mask
+        make-external-mask:
+            cab: ddf_makemask
+            params:
+                RestoredIm: =previous.app_restored_mfs
+                Th: 5.0
+
+        # DDF.py image_DI_Clustered.parset --Output-Name image_DI_Clustered.DeeperDeconv --Predict-InitDicoModel image_DI_Clustered.DicoModel --Cache-Reset 0 --Cache-Dirty forceresidual --Cache-PSF force --Deconv-MaxMajorIter 1 --Mask-Auto 0 --Mask-External image_DI_Clustered.app.restored.fits.mask.fits
+        finalize-deconvolution:
+            cab: ddfacet
+            info: "Do a final major cycle (explicitly saying DDFacet to continue from the residual cache/image), using that ideal complete and robust mask and disabling automasking"
+            params:
+                parset: =steps.inital-masked-deconvolution.parset_out
+                Output.Name: '{steps.inital-masked-deconvolution.Output.Name}_deeper_deconv'
+                Predict.InitDicoModel: =steps.inital-masked-deconvolution.skymodel
+                Cache:
+                    Reset: false
+                    Dirty: forceresidual
+                    PSF: force
+                Deconv:
+                    MaxMajorIter: 1
+                Mask:
+                    Auto: false
+                    External: =steps.make-external-mask.OutputMask
+
+
+        # kMS.py --MSName <YourData.ms/txt> --FieldID 0 --SolverType KAFCA
+        #       --PolMode Scalar --BaseImageName image_DI_Clustered.DeeperDeconv --dt 5 --NCPU 96
+        #       --OutSolsName DD0 --NChanSols 20 --InCol CORRECTED_DATA --TChunk 2 --BeamModel FITS --FITSParAngleIncDeg 0.5 --FITSFile='/SomePath/meerkat_pb_jones_cube_95channels_$(xy)_$(reim).fits' --CenterNorm 1 --FITSFeed xy --FITSFeedSwap 1 --ApplyPJones 1 --FlipVisibilityHands 1 --NChanBeamPerMS 20
+
+        killms-target:
+            _use: lib.steps.killms.base
+            skip: false
+            info: Run killMS
+            params:
+                MSName: =recipe.target-ms
+                FieldID: 0
+                dt: 5
+                NChanSols: 20
+                BaseImageName: =previous.Output.Name
+                NodesFile: =steps.inital-masked-deconvolution.Facets.CatNodes
+                SolverType: =root.killms-solvertype
+                OutSolsName: DD0
+                Parallel: true
+                SubOnly: false
+                NCPU: 12
+        # # syscall += gen.generate_syscall_killms(myms=myms,
+        # #             baseimg=ddf_img_prefix,
+        # #             ncpu=myNCPU,
+        # #             outsols='killms-'+cfg.KMS_SOLVERTYPE,
+        # #             nodesfile=CAL_3GC_FACET_REGION+'.npy')
+        #
+        # plot-killmms:
+        #     skip: true
+        #     cab: plotkillms
+        #     # syscall += 'python3 '+OXKAT+'/PLOT_killMS_sols.py '+myms+' killms-'+cfg.KMS_SOLVERTYPE
+        #
+        # DDF.py image_DI_Clustered.DeeperDeconv.parset --Output-Name image_DI_Clustered.DeeperDeconv.AP
+        #       --Cache-Reset 1 --Cache-PSF auto --Cache-Dirty auto
+        #       --Predict-InitDicoModel image_DI_Clustered.DeeperDeconv.DicoModel
+        #       --DDESolutions-DDSols DD0 --Beam-Smooth 1 --Weight-ColName [WEIGHT_SPECTRUM,IMAGING_WEIGHT]
+
+        corrected-ddfacet:
+            info: "Run DDFacet on CORRECTED_DATA of {recipe.target-ms}', applying killMS solutions"
+            cab: ddfacet
+            params:
+                parset: =steps.finalize-deconvolution.parset_out
+                Output.Name: '{recipe.ddf-img-prefix}_corrected.AP'
+                Cache:
+                    Reset: true
+                    Dirty: auto
+                    PSF: auto
+                Predict.InitDicoModel: =steps.finalize-deconvolution.skymodel
+                DDESolutions.DDSols: DD0
+                Beam:
+                    Smooth: true
+                Weight:
+                    ColName: WEIGHT_SPECTRUM  # '[WEIGHT_SPECTRUM, IMAGING_WEIGHT]'
+
+        #     # syscall += gen.generate_syscall_ddfacet(mspattern=myms,
+        #     #             imgname=kms_img_prefix,
+        #     #             chunkhours=1,
+        #     #             ncpu=myNCPU,
+        #     #             initdicomodel=ddf_img_prefix+'.DicoModel',
+        #     #             hogbom_maxmajoriter=0,
+        #     #             hogbom_maxminoriter=1000,
+        #     #             mask=mask,
+        #     #             ddsols='killms-'+cfg.KMS_SOLVERTYPE)
+        #
+
+        beam-mask:
+            cab: pbcor-katbeam
+            info: "Apply masking  to 3GC DDFacet image"
+            skip: false
+            params:
+                inputfits: =steps.corrected-ddfacet.app_restored_mfs
+                band: L
+                savemasked: true
+                overwrite: true
+                freqaxis: 4     # DDFacet FITS
+
+        #     # step = {}
+        #     # step['step'] = 4
+        #     # step['comment'] = 'Apply primary beam correction to '+targetname+' 2GC DDFacet image'
+        #     # step['dependency'] = 0
+        #     # step['id'] = 'PBCO1'+code
+        #     # syscall = CONTAINER_RUNNER+ASTROPY_CONTAINER+' ' if USE_SINGULARITY else ''
+        #     # syscall += 'python3 '+TOOLS+'/pbcor_katbeam.py --band '+band[0]+' --freqaxis 4 '+ddf_img_prefix+'.app.restored.fits'
+        #     # step['syscall'] = syscall
+        #     # steps.append(step)
+        #
+        # beam-correct-3:
+        #     cab: pbcor-katbeam
+        #     info: "Apply primary beam correction to {recipe.target-name} 3GC DDFacet image"
+        #     skip: true
+        #     params:
+        #         inputfits: =steps.corrected-ddfacet.app_restored_mfs
+        #         band: L
+        #         overwrite: true
+        #
+        #     # step = {}
+        #     # step['step'] = 5
+        #     # step['comment'] = 'Apply primary beam correction to '+targetname+' 3GC DDFacet image'
+        #     # step['dependency'] = 4
+        #     # step['id'] = 'PBCO2'+code
+        #     # syscall = CONTAINER_RUNNER+ASTROPY_CONTAINER+' ' if USE_SINGULARITY else ''
+        #     # syscall += 'python3 '+TOOLS+'/pbcor_katbeam.py --band '+band[0]+' --freqaxis 4 '+kms_img_prefix+'.app.restored.fits'
+        #     # step['syscall'] = syscall
+        #     # steps.append(step)
+        #
+
+
+target-3gc:
+    info: "Stage 5 of the white-belt pipeline: performs Direction-Dependent self-calibration"
+    inputs:
+        ms:
+            dtype: MS
+            required: true
+            info: "MeerKAT measurement set after 1GC"
+        target-list:
+            dtype: List[str]
+            required: true
+        outname:
+            dtype: str
+            info: Output directory name
+            required: true
+        facet_centres:
+            dtype: File
+            info: A DS9 region file definining the tessel centres for the targets
+
+    _include: white-belt-setup.yml
+
+    assign_based_on:
+        _include: white-belt-config.yml
+
+    assign:
+        num-targets: =LEN(recipe.target-list)
+
+
+    steps:
+
+        ########################################################################
+        #
+        #       DIRECTION DEPENDENT SELF-CAL ON THE TARGETS
+        #
+        ########################################################################
+
+        # convert-beams:
+        #     info: Convert beams using suricat
+        #     cab: suricat
+
+        loop-targets-3gc:
+            info: Direction-independent self-cal on targets
+            recipe: cal-loop-targets-3gc
+            params:
+                ms: =recipe.ms
+                targets: =recipe.target-list
+                target-indices: =RANGE(recipe.num-targets)
+

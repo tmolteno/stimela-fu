@@ -1,0 +1,182 @@
+vars:
+  ben-hugo:
+    images:
+      registry: docker.io
+      version: 0.8.0
+  tim-molteno:
+    images:
+      registry: ghcr.io
+      version: v0.8.1.1
+
+cabs:
+    ddfacet:
+        name: ddfacet
+        image:
+            _use: vars.tim-molteno.images
+            name: tmolteno/ddfacet
+        command: DDF.py
+        policies:
+            prefix: '--'
+            # pass True options as ..option True
+            explicit_true: 1
+            # pass False options as ..option False
+            explicit_false: 0
+            replace:
+                '.': '-'
+        inputs:
+            parset:
+                dtype: File
+                required: false
+                info: "Name of parset to load parameters from (default is to start with global default settings.)"
+                policies:
+                    positional_head: true
+            _include: ddfacet_stimela_inputs_schema.yml
+
+        outputs:
+            parset_out:
+                dtype: File
+                must_exist: false
+                implicit: '{current.Output.Name}.parset'
+            dirty_mfs:
+                dtype: File
+                must_exist: false
+                implicit: '{current.Output.Name}.dirty.fits'
+            dirty_corr_mfs:
+                dtype: File
+                must_exist: false
+                implicit: '{current.Output.Name}.dirty.corr.fits'
+            app_restored_mfs:
+                dtype: File
+                must_exist: false
+                implicit: '{current.Output.Name}.app.restored.fits'
+            skymodel:
+                dtype: File
+                must_exist: false
+                implicit: '{current.Output.Name}.DicoModel'
+
+
+    killms:
+        image:
+            _use: vars.tim-molteno.images
+            name: tmolteno/killms
+            version: v3.2.2p3
+        command: kMS.py
+        policies:
+            # pass True options as ..option 1
+            explicit_true: 1
+            # pass False options as ..option 0
+            explicit_false: 0
+        inputs:
+            parset:
+                dtype: File
+                required: false
+                info: "Name of parset to load parameters from (default is to start with global default settings.)"
+                policies:
+                    positional_head: true
+
+            _include: killms_stimela_schema.yml
+
+        outputs:
+            parset_out:
+                dtype: File
+                must_exist: true
+                implicit: '{current.BaseImageName}.parset'
+
+
+    ddf_makemodel:
+        image:
+            _use: vars.tim-molteno.images
+            name: tmolteno/ddfacet
+        command: MakeModel.py
+        inputs:
+            ds9PreClusterFile:
+                dtype: File
+                required: true
+            BaseImageName:
+                dtype: str
+                required: true
+            NCluster:
+                dtype: int
+                default: 0
+        outputs:
+            ClusterCat:
+                implicit: '{current.ds9PreClusterFile}.ClusterCat.npy'
+
+
+    ddf_makemask:   #MakeMask.py --RestoredIm image_DI_Clustered.app.restored.fits --Th 5
+        image:
+            _use: vars.tim-molteno.images
+            name: tmolteno/ddfacet
+        command: MakeMask.py
+        inputs:
+            RestoredIm:
+                dtype: File
+                required: true
+            Th:
+                dtype: float
+                required: true
+        outputs:
+            OutputMask:
+                implicit: '{current.RestoredIm}.mask.fits'
+
+
+    clustercat:
+        image:
+            _use: vars.tim-molteno.images
+            name: tmolteno/ddfacet
+        command: ClusterCat.py
+        inputs:
+            SourceCat:
+                dtype: File
+                required: true
+            NGen:
+                dtype: int
+                default: 100
+            NCluster:
+                dtype: int
+                required: true
+            CentralRadius:
+                dtype: float
+                default: 0.0
+            FluxMin:
+                dtype: float
+                default: 0.000001
+            NCPU:
+                dtype: int
+                default: 1
+            DoPlot:
+                dtype: int
+                default: 0
+        outputs:
+            OutClusterCat:
+                dtype: File
+                must_exist: false
+                required: true
+
+
+    ddfacet-get-npix:
+        info: Find out the value of NPIX to pass into DDFacet.
+        image:
+            _use: vars.tim-molteno.images
+            name: tmolteno/ddfacet
+        inputs:
+            NPixIn:
+                dtype: int
+                required: true
+            Padding:
+                dtype: int
+                required: true
+        outputs:
+            NPixOut:
+                dtype: int
+                info: The value of NPIX that you should use for DDFacet.
+        flavour:
+            kind: python-code
+        command: |
+            from DDFacet.ToolsDir.ModToolBox import EstimateNpix
+            npixels = EstimateNpix(NPixIn, Padding)
+            print(f"DDFacet NPix = {npixels}")
+            NPixOut = int(npixels[0])
+
+
+

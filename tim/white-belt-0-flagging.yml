@@ -1,0 +1,241 @@
+#!/usr/bin/env -S stimela run
+# Author. Tim Molteno tim@elec.ac.nz
+# This is a white-belt level Stimela 2.0 processing pipeline
+# to do first-generation calibration (flux and bandass) for
+# MeerKAT radio telescope data.
+
+opts:
+    log:
+        dir: logs/log-{config.run.datetime}
+        name: log-{info.fqname}
+        nest: 2
+        symlink: log
+    backend:
+        slurm:
+            srun_opts:
+                mem: 32G
+                cpus-per-task: 1
+
+# include cab definitions
+_include:
+    - (cultcargo):
+        - wsclean.yml
+        - quartical.yml
+        - tricolour.yml
+        - crystalball.yml
+        - casa:
+            - clearcal.yml
+            - calibration.yml
+            - mstransform.yml
+            - flag.yml
+
+    - tcam-cabs.yml
+
+_scrub:
+    - lib.misc.casa6.command-data.backend.singularity.bind_dirs.dot-casa
+
+recipe-loop-autocal:
+    info: Run autoflaggers on a list of sources
+
+    inputs:
+        ms: MS
+        targets: List[str]
+        target-indices: List[int]
+    assign:
+        target: =recipe.targets[recipe.index]
+
+    for_loop:
+        var: index
+        over: target-indices
+    steps:
+        # flagdata(vis=myms,mode='rflag',datacolumn='data',field=bpcal_name)
+        flag-rflag:
+            info: "Flag automatically using rflag"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: rflag
+                datacolumn: 'DATA'
+                field: =recipe.target
+                action: apply
+        # flagdata(vis=myms,mode='tfcrop',datacolumn='data',field=bpcal_name)
+
+        flag-tfcrop:
+            info: "Flag automatically using tfcrop"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: tfcrop
+                datacolumn: 'DATA'
+                field: =recipe.target
+                action: apply
+
+        # flagdata(vis=myms,mode='extend',growtime=90.0,growfreq=90.0,growaround=True,flagneartime=True,flagnearfreq=True,field=bpcal_name)
+
+        flag-extend:
+            info: "Flag extend"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: extend
+                field: =recipe.target
+                growtime: 90.0
+                growfreq: 90.0
+                growaround: true
+                flagneartime: true
+                flagnearfreq: true
+                action: apply
+
+initial-flagging:
+    info: "Do basic MeerKAT flagging L-Band Only"
+
+    inputs:
+        master_ms:
+            dtype: MS
+            required: true
+            info: "MeerKAT measurement set original"
+        ms:
+            dtype: MS
+            required: true
+            must_exist: false
+            info: "MeerKAT measurement set after averaging"
+        bpcal:
+            dtype: str
+            required: true
+        phasecal-list:
+            dtype: List[str]
+            required: true
+        outname:
+            dtype: str
+            info: Output directory name
+            required: true
+        keep_scans:
+            dtype: str
+            info: The scan numbers to keep (eg 0~5 or 1,2,3)
+            default: ''
+
+    _include: white-belt-setup.yml
+
+    steps:
+
+        master-info:
+            cab: quartical-summary
+            params:
+                ms: =recipe.master_ms
+
+        average-freq:
+            info: 'Average the MS to {recipe.nchan} channels'
+            skip: false
+            cab: casa.mstransform
+            params:
+                ms: =recipe.master_ms
+                datacolumn: DATA
+                outputvis: =recipe.ms
+                # field = myfields
+                scan: =recipe.keep_scans
+                chanaverage: true
+                chanbin: =recipe.ms-chanbin       # number_channels / number_of_channels_wanted = 4096 / 32
+                # timeaverage: true
+                # timebin: '8s'
+                realmodelcol: true
+                usewtspectrum: true
+                keepflags: true
+                # regridms: true
+                # uvrange:  '<{root.ms-uvmax}'    # Use if limiting the MS to shorter baselines.
+
+        averaged-ms-info:
+            cab: quartical-summary
+            params:
+                ms: =recipe.ms
+
+        flag-above:
+            info: Flag uv range (rather than doing this in the average mstransorm step)
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: manual
+                uvrange: '>{root.ms-uvmax}'
+
+        clearcal:
+            info: Clear calibration
+            cab: casa.clearcal
+            params:
+                ms: = recipe.ms
+                addmodel: true
+
+        flag-spw-all-baselines:
+            info: "Flag frequencies at edges (over all baselines)"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: 'manual'
+                spw: =recipe.cal-1gc.flag-all-baselines.spw
+
+
+        flag-spw-short-baselines:
+            info: "Frequency ranges to flag over a subset of baselines"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: 'manual'
+                spw: =recipe.cal-1gc.flag-short-baselines.spw
+                uvrange: =recipe.cal-1gc.flag-short-baselines.uvrange
+
+        flag-autocorr:
+            info: "Manually flag autocorrelation"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: 'manual'
+                autocorr: true
+                action: apply
+
+        flag-clip-zeros:
+            info: "Manually clip zeros"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: 'clip'
+                clipzeros: true
+
+        flag-clip-max:
+            info: "Manually clip large"
+            cab: casa.flagdata
+            params:
+                ms: =recipe.ms
+                mode: 'clip'
+                clipminmax: [0.0, 100.0]
+
+        flag-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: 'basic'
+
+
+        # 1GC_05_Casa_autoflag_cals_DATA
+
+        autoflag-primary:
+            recipe: recipe-loop-autocal
+            params:
+                ms: =recipe.ms
+                targets: =LIST(recipe.bpcal)
+                target-indices: [0]
+
+        loop-pcal-autoflag:
+            info: "Run autoflaggers on the phase calibrators"
+            recipe: recipe-loop-autocal
+            params:
+                ms: =recipe.ms
+                targets: =recipe.phasecal-list
+                target-indices: =RANGE(LEN(recipe.phasecal-list))
+
+        flag-auto-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: 'autoflag_cals_data'

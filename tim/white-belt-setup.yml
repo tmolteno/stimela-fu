@@ -1,0 +1,23 @@
+assign:
+    band: L
+
+    # some more directory assignments
+    dirs:
+        ms: "msdir"  # MSs live here
+        temp: "./tmp" # temp files go here
+        base: "." # base project directory -- directory of recipe by default, but see below
+
+    dir-out: "{recipe.dirs.base}/{recipe.outname}" # output products go here
+    image-prefix: "{recipe.dir-out}/im{info.suffix}/im{info.suffix}" # prefix for image names at each step
+    log.dir: "{recipe.dir-out}/logs/log-{config.run.datetime}" # put logs into output dir
+
+
+    # https://github.com/IanHeywood/oxkat/blob/master/oxkat/config.py
+
+    lib.steps.quartical.base.params.input_ms.time_chunk: 36
+    lib.steps.quartical.base.params.input_ms.freq_chunk: 1024
+    lib.steps.quartical.base.params.dask.threads: 4
+    lib.steps.quartical.base.params.dask.scheduler: threads
+
+assign_based_on:
+    _include: white-belt-config.yml

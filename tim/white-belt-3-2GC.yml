@@ -1,0 +1,245 @@
+#!/usr/bin/env -S stimela run
+# Author. Tim Molteno tim@elec.ac.nz
+# This is a white-belt level Stimela 2.0 processing pipeline
+# to do first-generation calibration (flux and bandass) for
+# MeerKAT radio telescope data.
+
+opts:
+    log:
+        dir: logs/log-{config.run.datetime}
+        name: log-{info.fqname}
+        nest: 2
+        symlink: log
+    backend:
+        slurm:
+            srun_opts:
+                mem: 256G
+                cpus-per-task: 64
+
+# include cab definitions
+_include:
+    - (cultcargo):
+        - wsclean.yml
+        - cubical.yml
+        - tricolour.yml
+        - crystalball.yml
+        - fitstool.yml
+        - casa:
+            - flag.yml
+            - listobs.yml
+            - bandpass.yml
+            - calibration.yml
+            - split.yml
+            - setjy.yml
+            - plotms.yml
+            - clearcal.yml
+            - mstransform.yml
+    - tcam-cabs.yml
+    - ddfacet.yml
+
+_scrub:
+    - lib.misc.casa6.command-data.backend.singularity.bind_dirs.dot-casa
+
+cal-loop-targets-2gc:
+    info: "Loop Direction-independendt self-cal on targets"
+    inputs:
+        ms: MS
+        targets: List[str]
+        target-indices: List[int]
+    assign:
+        ms-root: =BASENAME(recipe.ms)
+        _include_post: white-belt-image-names.yml
+
+        stamp: 'tstamp'
+        data-img-prefix: "{recipe.target-prefix}_datamask"
+        corr-img-prefix: "{recipe.target-prefix}_pcalmask"
+        k-outname: 'delaycal_{recipe.target-name}_{recipe.stamp}'
+        k-outdir: "{recipe.k-outname}.cc"
+        k-saveto: "{recipe.k-outname}.parmdb"
+
+    for_loop:
+        var: index
+        over: target-indices
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+        masked-clean:
+            info: "Run wsclean, masked deconvolution of the DATA column"
+            _use: lib.steps.imaging-standard
+            skip: false
+            params:
+                ms: =recipe.target-ms
+                prefix: =recipe.data-img-prefix
+                column: DATA
+                fits-mask: =recipe.mask0-image
+
+        primary-beam-correct:
+            cab: pbcor-katbeam
+            info: Apply primary beam correction to 1GC target image
+            skip: false
+            params:
+                inputfits: "{previous.prefix}-image.fits"
+                band: L
+                overwrite: true
+                pbcor_fits: "{previous.prefix}-image-pbcor.fits"
+
+        # run-cubical:
+        #     cab: cubical
+        #     skip: true
+        #     info: Run CubiCal with f-slope solver
+        #     params:
+        #         parset: "cubical/2gc_delaycal.parset"
+        #         data:
+        #             ms: =recipe.target-ms
+        #         out:
+        #             dir: =recipe.k-outdir
+        #             name: =recipe.k-outname
+        #         bbc:
+        #             save-to: =recipe.k-saveto
+        #         dist:
+        #             nworker: 1
+        #             max-chunks: 1
+
+        run-quartical:
+            cab: quartical
+            skip: false
+            info: Run quartical with delaycal
+            _use: lib.steps.quartical.k
+            params:
+                input_ms:
+                    path: =recipe.target-ms
+                    select_fields: [0]
+                    weight_column: WEIGHT_SPECTRUM
+                input_model:
+                    recipe: MODEL_DATA
+                solver:
+                    terms: [K]
+                    iter_recipe: [50]
+                    propagate_flags: true
+                    robust: false
+                output:
+                    gain_directory: '{root.dir-out}/gkb.qc'
+                    overwrite: true
+                    products: [corrected_data, corrected_weight]
+                    columns: [CORRECTED_DATA, WEIGHT_SPECTRUM]
+                    flags: true
+                mad_flags:
+                    enable: true
+
+        corrected-clean:
+            skip: false
+            _use: lib.steps.imaging-standard
+            info: 'wsclean, masked deconvolution of the CORRECTED_DATA column of {recipe.target-ms}'
+            params:
+                ms: =recipe.target-ms
+                prefix: =recipe.corr-img-prefix
+                column: CORRECTED_DATA
+                fits-mask: =recipe.mask0-image
+
+
+        make-mask:
+            info: " 4 Refine the cleaning mask for target {recipe.target-name}"
+            cab: make-mask
+            skip: false
+            params:
+                inputfits: '{previous.prefix}-image.fits'
+                outfile: =recipe.mask1-image
+                threshold: 5.5
+
+
+            # step['comment'] = 'Refine the cleaning mask for '+targetname+', crop for use with DDFacet'
+            # step['dependency'] = 3
+            # step['id'] = 'MASK1'+code
+            # syscall = CONTAINER_RUNNER+OWLCAT_CONTAINER+' ' if USE_SINGULARITY else ''
+            # syscall += gen.generate_syscall_makemask(restoredimage = corr_img_prefix+'-MFS-image.fits',
+            #                         outfile = corr_img_prefix+'-MFS-image.mask1.fits',
+            #                         thresh = 5.5,
+            #                         zoompix = cfg.DDF_NPIX)[0]
+            # step['syscall'] = syscall
+            # steps.append(step)
+
+
+        estimate-npix:
+            cab: ddfacet-get-npix
+            skip: false
+            params:
+                NPixIn: =root.image-size
+                Padding: 1
+
+        resize-mask:
+            info: Crop the mask to the DDF-NPIX size for use with DDFacet
+            cab: fitstool
+            params:
+                images: ['{steps.make-mask.outfile}']
+                zoom: =steps.estimate-npix.NPixOut
+                output: =recipe.mask-ddf-image
+
+            # zoomfits = outfile.replace('.fits','.zoom'+str(zoompix)+'.fits')
+            # syscall += ' && fitstool.py -z '+str(zoompix)+' -o '+zoomfits+' '
+            # syscall += outfile
+
+        corrected-beam-correct:
+            info: Apply primary beam correction to 2GC image
+            cab: pbcor-katbeam
+            skip: false
+            params:
+                inputfits: '{recipe.corr-img-prefix}-image.fits'
+                band: L
+                overwrite: true
+                pbcor_fits: "{recipe.corr-img-prefix}-MFS-image.fits"
+
+
+            # step['comment'] = 'Apply primary beam correction to '+targetname+' 2GC image'
+            # step['dependency'] = 3
+            # step['id'] = 'PBCO2'+code
+            # syscall = CONTAINER_RUNNER+ASTROPY_CONTAINER+' ' if USE_SINGULARITY else ''
+            # syscall += 'python3 '+TOOLS+'/pbcor_katbeam.py --band '+band[0]+' '+corr_img_prefix+'-MFS-image.fits'
+            # step['syscall'] = syscall
+            # steps.append(step)
+
+
+target-2gc:
+    info: "Stage 4 of the white-belt pipeline: performs direction-independent self-calibration"
+    inputs:
+        ms:
+            dtype: MS
+            required: true
+            info: "MeerKAT measurement set after 1GC"
+        outname:
+            dtype: str
+            info: Output directory name
+            required: true
+        target-list:
+            dtype: List[str]
+            required: true
+
+    _include: white-belt-setup.yml
+
+    assign_based_on:
+        _include: white-belt-config.yml
+
+    assign:
+        num-targets: =LEN(recipe.target-list)
+
+    steps:
+
+        ########################################################################
+        #
+        #       DIRECTION INDEPENDENT SELF-CAL ON THE TARGETS
+        #
+        ########################################################################
+
+        loop-targets-2gc:
+            info: Direction-independent self-cal on targets
+            recipe: cal-loop-targets-2gc
+            params:
+                ms: =recipe.ms
+                targets: =recipe.target-list
+                target-indices: =RANGE(recipe.num-targets)
+
+        flag-final-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: '2gc'

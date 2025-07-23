@@ -1,0 +1,143 @@
+#!/usr/bin/env -S stimela run
+# Author. Tim Molteno tim@elec.ac.nz
+# This is a white-belt level Stimela 2.0 processing pipeline
+# to do first-generation calibration (flux and bandass) for
+# MeerKAT radio telescope data.
+
+opts:
+    log:
+        dir: logs/log-{config.run.datetime}
+        name: log-{info.fqname}
+        nest: 2
+        symlink: log
+    backend:
+        slurm:
+            srun_opts:
+                mem: 256G
+                cpus-per-task: 64
+
+# include cab definitions
+_include:
+    - (cultcargo):
+        - wsclean.yml
+        - quartical.yml
+        - tricolour.yml
+        - crystalball.yml
+        - casa:
+            - flag.yml
+            - listobs.yml
+            - bandpass.yml
+            - calibration.yml
+            - split.yml
+            - setjy.yml
+            - plotms.yml
+            - clearcal.yml
+    - tcam-cabs.yml
+
+_scrub:
+    - lib.misc.casa6.command-data.backend.singularity.bind_dirs.dot-casa
+
+
+cal-loop-targets-flag:
+    info: "flag the targets"
+    inputs:
+        ms: MS
+        targets: List[str]
+        target-indices: List[int]
+    assign:
+        ms-root: =BASENAME(recipe.ms)
+        _include_post: white-belt-image-names.yml
+
+    for_loop:
+        var: index
+        over: target-indices
+        display_status: "{var}={value} {index1}/{total}"
+    steps:
+        target-flag:
+            cab: tricolour
+            info: Flag target
+            skip: false
+            params:
+                ms: =recipe.target-ms
+                config: 'tricolour/target_flagging_1_narrow.yaml'
+                data-column: DATA
+                field-names: 0
+                flagging-strategy: polarisation
+
+
+        blind-clean:
+            info: "Blind wsclean on DATA column of target"
+            _use: lib.steps.imaging-standard
+            skip: false
+            params:
+                ms: =steps.target-flag.ms
+                prefix: =recipe.datablind-prefix
+                column: DATA
+                auto-threshold: false
+
+        make-mask:
+            info: "Make initial cleaning mask for target"
+            cab: make-mask
+            skip: false
+            params:
+                inputfits: '{previous.prefix}-image.fits'
+                outfile:  =recipe.mask0-image
+
+        primary-beam-correct:
+            cab: pbcor-katbeam
+            params:
+                inputfits: '{steps.blind-clean.prefix}-image.fits'
+                band: L
+                overwrite: true
+                pbcor_fits: "{steps.blind-clean.prefix}-image-pbcor.fits"
+
+
+
+target-flagging:
+    info: "Stage 3 of the white-belt pipeline: Flag and create masks for targets."
+
+    inputs:
+        ms:
+            dtype: MS
+            required: true
+            info: "MeerKAT measurement set after 1GC"
+        outname:
+            dtype: str
+            info: Output directory name
+            required: true
+        target-list:
+            dtype: List[str]
+            required: true
+
+
+    _include: white-belt-setup.yml
+
+    assign_based_on:
+        _include: white-belt-config.yml
+
+    assign:
+        num-targets: =LEN(recipe.target-list)
+
+    steps:
+
+        ########################################################################
+        #
+        #       NOW FLAG THE TARGETS
+        #
+        ########################################################################
+
+        loop-targets-flag:
+            info: This step flags the targets
+            recipe: cal-loop-targets-flag
+            params:
+                ms: =recipe.ms
+                targets: =recipe.target-list
+                target-indices: =RANGE(recipe.num-targets)
+
+        flag-final-save:
+            info: Save the flags
+            cab: casa.flagman
+            params:
+                ms: =recipe.ms
+                mode: save
+                versionname: 'tricolour1'

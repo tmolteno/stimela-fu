@@ -1,0 +1,126 @@
+#
+#   Config for white-belt imaging.
+#
+#
+# This is to be used using
+#     assign_based_on:
+#       _include: white-belt-config.yml
+#     inputs:
+#           band:
+#               info: "Selects band, see white-belt-config.yml"
+
+config.run.node:
+    schmalzburg:
+        # We only have 64GB RAM
+        ncpu: 6
+        # lib.steps.quartical.base.params.input_ms.time_chunk: 36
+        # lib.steps.quartical.base.params.input_ms.freq_chunk: 1024
+        # lib.steps.quartical.base.params.dask.threads: 4
+        # lib.steps.quartical.base.params.dask.scheduler: threads
+
+    dibbler:
+        ncpu: 2
+
+    DEFAULT:
+        ncpu: 1
+
+band:
+
+    # https://github.com/IanHeywood/oxkat/blob/master/oxkat/config.py
+
+    L:
+        scale-factor: 1
+        image-size: 10700    # was 10240
+        image-pixel-res: 1.11
+        image-fov-degrees: 3.3
+        ms-uvmax: 8000
+        ms-nchan: 512
+        ms-chanbin: 146 # (Number of 2511 = 3^4 * 31 )
+
+        auto-ddf-mask: true
+        auto-ddf-cluster-count: 10
+
+        ddf-beam-models: 'beams/primary_beam_mh_95channels_10deg_$(xy)_$(reim).fits'
+        killms-solvertype: KAFCA
+        mask-prefix: 'masks/'
+        deep-mask-0: '_mask0_{recipe.image-size}.fits'
+        deep-mask-1: '_mask1_{recipe.image-size}.fits'
+        deep-mask-2: '_mask2.fits'
+        deep-mask-ddf: '-mask-ddf.fits'
+        htc_size: 3072
+        htc_scale: 2.4arcsec
+        wsclean_nchan: 8
+        ddf-Image-Cell: =recipe.image-pixel-res
+        psf_size: 6
+        weight: "briggs 0"
+        ddf-precluster-file: dd-regs-lband.reg
+        initial-flag-version: cb_flag__target_rfi_after
+        lightcurves-witshin: 0.5deg
+        mdv-beams: beam/MeerKAT_L_band_primary_beam.npz
+        power-beam: beams/MeerKAT_L_band_StokesBeam.I.fits
+        catalog-flux-column: flux_L
+
+        ddf-cache: '{recipe.dir-out}/ddf_tmp'
+
+        cal-1gc:
+            flag-all-baselines:
+                # Lower band edge # Upper bandpass edge # Galactic HI
+                spw: '*:850~900MHz, *:1658~1800MHz,*:1419.8~1421.3MHz'
+            flag-short-baselines:
+                spw: |-
+                    *:900MHz~915MHz,
+                    *:925MHz~960MHz,
+                    *:1080MHz~1095MHz,
+                    *:1565MHz~1585MHz,
+                    *:1217MHz~1237MHz,
+                    *:1375MHz~1387MHz,
+                    *:1166MHz~1186MHz,
+                    *:1592MHz~1610MHz,
+                    *:1242MHz~1249MHz,
+                    *:1191MHz~1217MHz,
+                    *:1260MHz~1300MHz,
+                    *:1453MHz~1490MHz,
+                    *:1616MHz~1626MHz,
+                    *:1526MHz~1554MHz,
+                    *:1600MHz
+                uvrange: '<600'
+
+            uvrange: ">150"
+            freqrange: "*:1100~1300MHz"  # "*:1300~1400MHz" TODO: Calculate this value
+            gapfill: 24
+
+
+    UHF:
+        deep-mask-1: masks/uhf-deep/im2-mask-13000.fits
+        deep-mask-notarget-1: masks/uhf-deep/im2-mask-nodwarf.fits
+        deep-mask-2: masks/uhf-deep/im2-mask.fits
+        deep-mask-notarget-2: masks/uhf-deep/im2-mask-nodwarf.fits
+        deep-mask-3: masks/uhf-deep/im3-mask.fits
+        deep-mask-notarget-3: masks/uhf-deep/im3-mask-nodwarf.fits
+        deep-mask-ddf: masks/uhf-deep/im3-mask-10125.fits
+        image-size: 13000
+        ddf-npix: 10125
+        image-pixel-res: 1.6
+        htc_size: 3072
+        htc_scale: 4.8arcsec
+        htfc_size: 2048
+        htfc_scale: 4.8arcsec
+        htfc_nband: 8
+        wsclean_nchan: 6
+        ddf-Image-Cell: 1.6
+        psf_size: 12
+        weight: "briggs 0"
+        ddf-precluster-file: dd-regs-uhf.reg
+        initial-flag-version: cbuhf_flag__target_rfi_after
+        lightcurves-within: 1deg
+        mdv-beams: beam/MeerKAT_U_band_primary_beam.npz
+        power-beam: beam/MeerKAT_U_band_StokesBeam.I.fits
+        catalog-flux-column: flux_U
+
+        cal-1gc:
+            flag-all-baselines:
+                spw: ''
+                uvrange: '<600'
+            uvrange: ">150"
+            freqrange: "*:850~900MHz"
+            gapfill: 24

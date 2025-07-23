@@ -1,0 +1,1177 @@
+_include:
+    - (cultcargo):
+          - quartical.yml
+          - genesis/cult-cargo-base.yml
+    - ddfacet.yml
+
+
+cabs:
+    copy:
+        command: "cp -a"
+        policies:
+            positional: true
+        inputs:
+            src:
+                dtype: Union[File, Directory]
+                required: true
+            dest:
+                dtype: Union[File, Directory]
+                required: true
+
+    mkdirs:
+        command: "mkdir -p"
+        policies:
+            positional: true
+        inputs:
+            dir:
+                dtype: Union[File, Directory]
+                required: true
+                must_exist: false
+
+
+    make-mask:
+        info: Generate a mask (from pyMakeMask by Ian)
+        inputs:
+            inputfits:
+                dtype: File
+                policies:
+                    positional: true
+
+            dilate:
+                dtype: int
+                default: 3
+            boxsize:
+                info: Box size to use for fields with compact islands
+                dtype: int
+                default: 500
+            smallbox:
+                dtype: int
+                default: 50
+            islandsize:
+                dtype: int
+                default: 30000
+            savenoise:
+                info: Enable to export noise image as FITS file (default = do not save noise image)
+                dtype: bool
+                default: false
+            threshold:
+                info: 'Sigma threshold for masking (default = 6.0)'
+                dtype: float
+                default: 6.0
+        outputs:
+            outfile:
+                dtype: File
+        flavour: python-code
+        command: |-
+            import numpy
+            import scipy.ndimage
+            import scipy.special
+            import shutil
+            import sys
+            from astropy.io import fits
+            from optparse import OptionParser
+            from scipy.ndimage.morphology import binary_dilation
+            from scipy.ndimage.measurements import label
+            from scipy.ndimage import sum as ndi_sum
+
+
+            def get_image(fitsfile):
+                print('Reading '+fitsfile)
+                input_hdu = fits.open(fitsfile)[0]
+                if len(input_hdu.data.shape) == 2:
+                        image = numpy.array(input_hdu.data[:,:])
+                elif len(input_hdu.data.shape) == 3:
+                        image = numpy.array(input_hdu.data[0,:,:])
+                else:
+                        image = numpy.array(input_hdu.data[0,0,:,:])
+                return image
+
+
+            def flush_fits(newimage,fitsfile):
+                print('Writing '+fitsfile)
+                f = fits.open(fitsfile,mode='update')
+                input_hdu = f[0]
+                if len(input_hdu.data.shape) == 2:
+                        input_hdu.data[:,:] = newimage
+                elif len(input_hdu.data.shape) == 3:
+                        input_hdu.data[0,:,:] = newimage
+                else:
+                        input_hdu.data[0,0,:,:] = newimage
+                f.flush()
+
+
+            def make_noise_map(restored_image,boxsize):
+                # Cyril's magic minimum filter
+                # Plundered from the depths of https://github.com/cyriltasse/DDFacet/blob/master/SkyModel/MakeMask.py
+                print('Generating noise map')
+                box = (boxsize,boxsize)
+                n = boxsize**2.0
+                x = numpy.linspace(-10,10,1000)
+                f = 0.5 * (1.0 + scipy.special.erf(x / numpy.sqrt(2.0)))
+                F = 1.0 - (1.0 - f)**n
+                ratio = numpy.abs(numpy.interp(0.5, F, x))
+                noise = -scipy.ndimage.filters.minimum_filter(restored_image, box) / ratio
+                negative_mask = noise < 0.0
+                noise[negative_mask] = 1.0e-10
+                median_noise = numpy.median(noise)
+                median_mask = noise < median_noise
+                noise[median_mask] = median_noise
+                print('Median noise value is '+str(median_noise))
+                return noise
+
+
+            # threshold = float(options.threshold)
+            # boxsize = int(options.boxsize)
+            # smallbox = int(options.smallbox)
+            # islandsize = int(options.islandsize)
+            # dilate = int(options.dilate)
+            # savenoise = options.savenoise
+            # outfile = options.outfile
+
+            input_image = get_image(inputfits)
+
+            print('Computing mask with box size: '+str(boxsize)+' pixels')
+            print('Threshold: '+str(threshold))
+            noise_image = make_noise_map(input_image,boxsize)
+            mask_image = input_image > threshold * noise_image
+
+            if smallbox != 0:
+                print('Counting islands...')
+                sizes = []
+                mask_image_view = mask_image.view(dtype=mask_image.dtype.newbyteorder())
+                labeled_mask_image, n_islands = label(mask_image)
+                print('Found '+str(n_islands))
+                print('Sizing them up...')
+                indices = numpy.arange(0,n_islands)
+                sizes = ndi_sum(mask_image, labeled_mask_image, indices)
+                sizes = numpy.sort(sizes)[::-1]
+                print('Island size threshold: '+str(islandsize))
+                print('Top five island sizes:')
+                print(sizes[0:5])
+                if sizes[0] < islandsize:
+                    print('Largest island has fewer than '+str(islandsize)+' pixels')
+                    print('Recomputing mask with box size: '+str(smallbox)+' pixels')
+                    noise_image = make_noise_map(input_image,smallbox)
+                    mask_image = input_image > threshold * noise_image
+                else:
+                    print('Sticking with box size: '+str(boxsize)+' pixels')
+
+            if savenoise:
+                noise_fits = inputfits.replace('.fits', '.noise.fits')
+                shutil.copyfile(inputfits, noise_fits)
+                flush_fits(noise_image, noise_fits)
+
+            mask_image[:,-1]=0
+            mask_image[:,0]=0
+            mask_image[0,:]=0
+            mask_image[-1,:]=0
+
+            if dilate != 0:
+                print('Dilating mask, '+str(dilate)+' iteration(s)')
+                dilated = binary_dilation(input = mask_image, iterations = dilate)
+                mask_image = dilated
+
+            if outfile == '':
+                mask_fits = inputfits.replace('.fits', '.mask.fits')
+            else:
+                mask_fits = outfile
+            shutil.copyfile(inputfits, mask_fits)
+
+            flush_fits(mask_image,mask_fits)
+
+            print('Done')
+
+
+    pbcor-katbeam:
+        info: Apply primary beam correction
+        inputs:
+            inputfits:
+                dtype: File
+                required: true
+                policies:
+                    positional: true
+            band:
+                dtype: str
+                choices: [L, U, S]
+                default: L
+                info: 'Select [U]HF or [L]-band (default = L-band)'
+            freq:
+               info: 'Frequency in MHz at which to evaluate beam model (default = get from input FITS header)'
+               dtype: str
+               default: ''
+            freqaxis:
+               info: 'Frequency axis in FITS header (default = 3, set to 4 for DDFacet images)'
+               dtype: int
+               default: 4
+            pbcut:
+               info: 'Primary beam gain level beyond which to blank output images (default = 0.3)'
+               dtype: float
+               default: 0.3
+            azavg:
+                info: 'Azimuthally-average the primary beam pattern (default = true)'
+                dtype: bool
+                default: false
+            savemasked:
+                info: 'save masked image (default = save corrected image)'
+                dtype: bool
+                default: false
+            savepbcor:
+                info: 'save primary beam corrected image (default = save corrected image)'
+                dtype: bool
+                default: false
+            savepb:
+                info: 'Save primary beam image (default = save PB image)'
+                dtype: bool
+                default: false
+            savewt:
+                info: 'Save weight image (default = save weight image)'
+                dtype: bool
+                default: false
+            masked_fits:
+                info: 'Filename for masked image (default = based on input image)'
+                dtype: str
+                default: ''
+            pbcor_fits:
+                info: 'Filename for primary beam corrected image (default = based on input image)'
+                dtype: str
+                default: ''
+            pb_fits:
+                info: 'Filename for primary beam image (default = based on input image)'
+                dtype: str
+                default: ''
+            wt_fits:
+                info: 'Filename for weight image (default = based on input image)'
+                dtype: str
+                default: ''
+            overwrite:
+                info: 'Overwrite any existing output files (default = do not overwrite)'
+                dtype: bool
+                default: false
+        flavour: python-code
+        command: |-
+            import numpy
+            import os
+            import sys
+            import time
+            from astropy.io import fits
+            from katbeam import JimBeam
+            from optparse import OptionParser
+            from shutil import copyfile
+
+            def msg(txt):
+                stamp = time.strftime(' %Y-%m-%d %H:%M:%S | ')
+                print(stamp+txt)
+
+
+            def check_file(filename):
+                exists = False
+                if os.path.isfile(filename):
+                    msg(filename+' exists, will not overwrite')
+                    exists = True
+                return exists
+
+
+            def check_name(name1,name2):
+                if name1 == name2:
+                    msg('Problem with auto-generated output name (does your input file have a .fits suffix?)')
+                    sys.exit()
+
+
+            def get_header(fitsfile,freqaxis):
+                inphdu = fits.open(fitsfile)
+                inphdr = inphdu[0].header
+                print(inphdr)
+                nx = inphdr.get('NAXIS1')
+                ny = inphdr.get('NAXIS2')
+                dx = inphdr.get('CDELT1')
+                dy = inphdr.get('CDELT2')
+                freq = inphdr.get(f"CRVAL{freqaxis}")
+                return nx,ny,dx,dy,freq
+
+
+            def get_image(fitsfile):
+                input_hdu = fits.open(fitsfile)[0]
+                if len(input_hdu.data.shape) == 2:
+                        image = numpy.array(input_hdu.data[:,:])
+                elif len(input_hdu.data.shape) == 3:
+                        image = numpy.array(input_hdu.data[0,:,:])
+                else:
+                        image = numpy.array(input_hdu.data[0,0,:,:])
+                return image
+
+
+            def flush_fits(newimage,fitsfile):
+                f = fits.open(fitsfile,mode='update')
+                input_hdu = f[0]
+                if len(input_hdu.data.shape) == 2:
+                        input_hdu.data[:,:] = newimage
+                elif len(input_hdu.data.shape) == 3:
+                        input_hdu.data[0,:,:] = newimage
+                else:
+                        input_hdu.data[0,0,:,:] = newimage
+                f.flush()
+
+
+            if azavg:
+                try:
+                    from skued import azimuthal_average as aa
+                except:
+                    print('scikit-ued not found, azimuthal averaging is not available.')
+                    print('Try: pip install scikit-ued')
+                    azavg = False
+
+            if [savepbcor,savepb,savewt,savemasked] == [False,False,False,False]:
+                print('Nothing to do, set one of savepbcor, savepb, savewt')
+                sys.exit()
+
+
+            if masked_fits == '':
+                masked_fits = inputfits.replace('.fits','.masked.fits')
+                check_name(inputfits,masked_fits)
+            if pbcor_fits == '':
+                pbcor_fits = inputfits.replace('.fits','.pbcor.fits')
+                check_name(inputfits,pbcor_fits)
+            if pb_fits == '':
+                pb_fits = inputfits.replace('.fits','.pb.fits')
+                check_name(inputfits,pb_fits)
+            if wt_fits == '':
+                wt_fits = inputfits.replace('.fits','.wt.fits')
+                check_name(inputfits,wt_fits)
+
+            # Bail out if some files will be overwritten
+
+            if not overwrite:
+                file_check = []
+                if savemasked:
+                    file_check.append(check_file(masked_fits))
+                if savepbcor:
+                    file_check.append(check_file(pbcor_fits))
+                if savepb:
+                    file_check.append(check_file(pb_fits))
+                if savewt:
+                    file_check.append(check_file(wt_fits))
+                if True in file_check:
+                    sys.exit()
+
+            pol = 'I' # hardwired Stokes I beam for now
+
+            # Set up band
+            if band == 'L':
+                beam_model = 'MKAT-AA-L-JIM-2020'
+                band = 'L-band'
+            elif band == 'U':
+                beam_model = 'MKAT-AA-UHF-JIM-2020'
+                band = 'UHF'
+            elif band == 'S':
+                beam_model = 'MKAT-AA-S-JIM-2020'
+                band = 'S-band'
+            msg(f"Band is {band}")
+            msg(f"Beam model is {beam_model}")
+            beam = JimBeam(beam_model)
+
+            # Get header info
+            msg('Reading FITS image')
+            msg(f" <--- {inputfits}")
+            nx,ny,dx,dy,fitsfreq = get_header(inputfits,freqaxis)
+            if nx != ny or abs(dx) != abs(dy):
+                msg('Can only handle square images / pixels')
+                sys.exit()
+            extent = nx*dx # degrees
+
+            if freq == '':
+                freq = fitsfreq/1e6
+            else:
+                freq = float(freq)
+
+            msg('Evaluating beam at '+str(round(freq,4))+' MHz')
+            interval = numpy.linspace(-extent/2.0,extent/2.0,nx)
+            xx,yy = numpy.meshgrid(interval,interval)
+            beam_image = beam.I(xx,yy,freq)
+
+            msg('Masking beam beyond the '+str(pbcut)+' level')
+            mask = beam_image < pbcut
+            beam_image[mask] = numpy.nan
+
+            if azavg:
+                msg('Azimuthally averaging the beam pattern')
+                x0 = int(nx/2)
+                y0 = int(ny/2)
+                radius,average = aa(beam_image,center=(x0,y0))
+                # This can probably be sped up...
+                for y in range(0,ny):
+                    for x in range(0,nx):
+                        val = (((float(y)-y0)**2.0)+((float(x)-x0)**2.0))**0.5
+                        beam_image[y][x] = average[int(val)]
+
+            if savemasked:
+                msg('Masking image')
+                input_image = get_image(inputfits)
+                masked_image = numpy.copy(input_image)
+                masked_image[mask] = numpy.nan
+
+                msg('Writing masked image')
+                msg(' ---> '+masked_fits)
+                copyfile(inputfits,masked_fits)
+                flush_fits(masked_image,masked_fits)
+            if savepbcor:
+                msg('Correcting image')
+                input_image = get_image(inputfits)
+                pbcor_image = input_image / beam_image
+                msg('Writing primary beam corrected image')
+                msg(' ---> '+pbcor_fits)
+                copyfile(inputfits,pbcor_fits)
+                flush_fits(pbcor_image,pbcor_fits)
+            if savepb:
+                msg('Writing primary beam image')
+                msg(' ---> '+pb_fits)
+                copyfile(inputfits,pb_fits)
+                flush_fits(beam_image,pb_fits)
+            if savewt:
+                msg('Writing weight (pb^2) image')
+                msg(' ---> '+wt_fits)
+                copyfile(inputfits,wt_fits)
+                flush_fits(beam_image**2.0,wt_fits)
+
+    quartical:
+        backend:
+            select: native
+            native:
+                # enable: true
+                virtual_env: ~/venvs/quartical
+
+    shadems-tim:
+        name: shadems-tim
+        image:
+            registry: quay.io/stimela2
+            version: cc0.1.3
+            name: shadems
+
+        command: shadems
+        info: Rapid Measurement Set plotting with xarray-ms and datashader.
+
+        defaults:
+            norm: auto
+            xcanvas: 1280
+            ycanvas: 900
+
+        # default policies for parameters
+        policies:
+            prefix: "--"
+            positional: false
+            repeat: list
+
+        inputs:
+            ms:
+                info: Measurement set to plot
+                required: true
+                writable: true
+                dtype: MS
+                policies:
+                    positional: true
+            xaxis:
+                info:
+                    "Xaxis to plot. Can be any MS column name, also: CHAN, FREQ, CORR, ROW,
+                    WAVEL, U, V, W, UV, and, for complex columns, keywords such as: 'amp', 'phase',
+                    'real', 'imag'. You can also specify correlations, e.g. 'DATA:phase:XX'.
+                    The order of specifiers does not matter."
+                dtype: str
+            yaxis:
+                info: Y axis to plot. Must be given the same number of times as --xaxis.
+                dtype: str
+            aaxis:
+                info:
+                    Intensity axis. If none, plot intensity (a.k.a. alpha channel) is proportional
+                    to density of points.Otherwise, a reduction function (--ared) is applied to
+                    the given values, and the result is used to determine intensity.
+                dtype: str
+            ared:
+                info: Alpha axis reduction function.
+                choices:
+                    - count
+                    - any
+                    - sum
+                    - min
+                    - max
+                    - mean
+                    - std
+                    - first
+                    - last
+                    - mode
+                dtype: str
+            colour-by:
+                info:
+                    Colour axis. All columns and variations listed under --xaxis are available
+                    for colouring by.
+                dtype: str
+            col:
+                info: Name of visibility column. Default is DATA. Two-column arithmetic is recognized.
+                dtype: str
+            noflags:
+                info: Ignore flags. Default is to honour
+                dtype: bool
+            noconj:
+                info: Do not show conjugate points in u,v plots. Default is true.
+                dtype: bool
+            xmin:
+                info: Minimum x-axis value. Default is data min.
+                dtype: float
+            xmax:
+                info: Maximum x-axis value to plot. Default is data max.
+                dtype: float
+            ymin:
+                info: Minimum y-axis value. Default is data min.
+                dtype: float
+            ymax:
+                info: Maximum y-axis value to plot. Default is data max.
+                dtype: float
+            cmin:
+                info: Minimum colouring value. Default is data-min.
+                dtype: float
+            cmax:
+                info: Maximum colouring value.  Default is data-max.
+                dtype: float
+            cnum:
+                info: Number of colours to use.
+                dtype: int
+            iter-field:
+                info: Separate plots per field. Default is combine all.
+                dtype: bool
+            iter-antenna:
+                info: Separate plots per antenna. Default is combine all.
+                dtype: bool
+            iter-spw:
+                info: Separate plots per spw. Default is combine all.
+                dtype: bool
+            iter-scan:
+                info: Separate plots per scan. Default is combine all.
+                dtype: bool
+            iter-corr:
+                info: Separate plots per correlation / Stokes. Default is combine all.
+                dtype: bool
+            ant:
+                info: Antennas to plot (comma-separated list of names). Default is all.
+                dtype: Union[str, List[str]]
+                policies:
+                    repeat: ","
+            ant-num:
+                info:
+                    Antennas to plot (comma-separated list of numbers, or a [start]:[stop][:step]
+                    slice, overrides --ant).
+                dtype: Union[str, List[int]]
+                policies:
+                    repeat: ","
+            baseline:
+                info: Baselines to plot, as 'ant1-ant2' (comma-separated list). Default is all.
+                dtype: Union[str, List[str]]
+                policies:
+                    repeat: ","
+            spw:
+                info: Spectral windows (DDIDs) to plot (comma-separated list) Default is all.
+                dtype: Union[int, List[int]]
+                policies:
+                    repeat: ","
+            field:
+                info: Field ID(s) to plot (comma-separated list). Default is all.
+                dtype: Union[int, str, List[str], List[int]]
+                policies:
+                    repeat: ","
+            scan:
+                info: Scans to plot (comma-separated list). Default is all.
+                dtype: Union[int, List[int]]
+                policies:
+                    repeat: ","
+            corr:
+                info:
+                    Correlations or Stokes to plot, use indices or labels (comma-separated list).
+                    Default is all.
+                dtype: Union[str, List[str]]
+                policies:
+                    repeat: ","
+            chan:
+                info: Channel slice, as [start]:[stop][:step].  Default is to plot all.
+                dtype: str
+            xcanvas:
+                info: Canvas x-size in pixels.
+                dtype: int
+            ycanvas:
+                info: Canvas y-size in pixels.
+                dtype: int
+            norm:
+                info:
+                    Pixel scale normalization. Default is 'log' when colouring, and 'eq_hist'
+                    when not.
+                choices:
+                    - auto
+                    - eq_hist
+                    - cbrt
+                    - log
+                    - linear
+                dtype: str
+            cmap:
+                info: Colorcet map used without --colour-by.
+                dtype: str
+            bmap:
+                info: Colorcet map used when colouring by a continuous axis.
+                dtype: str
+            dmap:
+                info: Colorcet map used when colouring by a discrete axis.
+                dtype: str
+            spread-pix:
+                info: Dynamically spread rendered pixels to this size.
+                dtype: int
+            spread-thr:
+                info: Threshold parameter for spreading (0 to 1).
+                dtype: float
+            bgcol:
+                info: RGB hex code for background colour. Default FFFFFF (white).
+                dtype: str
+            fontsize:
+                info: Font size for all text elements.
+                dtype: float
+            suffix:
+                info: Suffix to be included in filenames.
+                dtype: str
+            png:
+                info: Output PNG name. Default is plot-{ms}{_field}{_Spw}{_Scan}{_Ant}-{label}{_alphalabel}{_colorlabel}{_suffix}.png
+                dtype: str
+            title:
+                info:
+                    Template for plot titles. Default title includes ms name, field, spw, scan,
+                    antenna, plot title, alpha title and colour title.
+                dtype: str
+            xlabel:
+                info: Template for X axis labels. Default is x-axis name and unit
+                dtype: str
+            ylabel:
+                info: Template for Y axis labels. Default is y-axis name and unit
+                dtype: str
+            debug:
+                info: Enable debugging output.
+                dtype: bool
+            row-chunk-size:
+                info:
+                    Row chunk size for dask-ms. Larger chunks may or may not be faster, but
+                    will certainly use more RAM.
+                dtype: int
+            num-parallel:
+                info:
+                    Run up to N renderers in parallel. Default is serial. Use -j0 to auto-set
+                    this to half the available cores.
+                dtype: int
+            profile:
+                info: Enable dask profiling output.
+                dtype: bool
+
+    inspector:
+        flavour: python-code
+        command: |
+            from casacore.tables import table as casatable
+            myms = casatable(ms, ack=False)
+            print(f"CASA read ms {myms}")
+            print(f"colnames{myms.colnames()}")
+            print(f"keywordnames{myms.keywordnames()}")
+            print(f"fields{myms.fieldnames()}")
+
+            if table != "MAIN":
+                mytable = casatable(ms.getkeyword(table), ack=False)
+                print(f"    colnames{mytable.colnames()}")
+                print(f"    keywordnames{mytable.keywordnames()}")
+                print(f"    fields{mytable.fieldnames()}")
+            else:
+                mytable = myms
+
+            mycol = mytable.col(column)
+
+            print(f"INSPECTOR: {table}:{column} has {mycol.nrows()} rows")
+        inputs:
+            ms:
+                dtype: MS
+                policies:
+                    positional: true
+                writable: true
+            table:
+                dtype: str
+            column:
+                dtype: str
+                default: DATA
+
+    tricolour-tim:
+        name: tricolour-tim
+        image:
+            registry: docker.io/tmolteno
+            name: tricolour
+        command: tricolour
+        inputs:
+            ms:
+                dtype: MS
+                policies:
+                    positional: true
+                writable: true
+            config:
+                dtype: File
+            ignore-flags:
+                dtype: bool
+            flagging-strategy:
+                choices: [standard, polarisation, total_power]
+            row-chunks:
+                dtype: int
+            baseline-chunks:
+                dtype: int
+            nworkers:
+                dtype: int
+            dilate-masks:
+                dtype: Union[int,str]
+            data-column:
+                dtype: str
+            field-names:
+                dtype: str
+            scan_numbers:
+                dtype: str
+            disable-post-mortem:
+                dtype: bool
+                default: true
+            window-backend:
+                choices: [numpy, zarr-disk]
+            temporary-directory:
+                dtype: Directory
+            subtract-model-column:
+                dtype: str
+
+    quartical-summary:
+        name: quartical-summary
+        image:
+            _use: cabs.quartical.image
+        command: goquartical-summary
+        policies:
+            _use: cabs.quartical.policies
+        inputs:
+            ms:
+                dtype: URI
+                must_exist: true
+                required: true
+                policies:
+                    positional: true
+                info: "Path to input measurement set, e.g. path/to/dir/foo.MS."
+            zarr_dir:
+                dtype: URI
+                mkdir: true
+                must_exist: false
+                required: false
+                policies:
+                    positional: true
+                info:
+                    Path to desired backup location. Note that this only allows
+                    the user to specify a directory and not the name of the backup
+                    zarr that will be created, e.g. path/to/dir.
+            output_dir:
+                dtype: URI
+                must_exist: false
+                mkdir: true
+                default: "."
+                policies:
+                    positional: true
+                info:
+                    Path to desired backup location. Note that this only allows
+                    the user to specify a directory and not the name of the backup
+                    zarr that will be created, e.g. path/to/dir.
+
+
+
+
+
+lib:
+    steps:
+        imaging-standard:
+            cab: wsclean
+            params:
+                ms: =recipe.ms
+                prefix: "{recipe.image-name}-{info.suffix}"
+                column: DATA
+                temp-dir: =root.dirs.temp
+                size: =root.image-size
+                scale: '{root.image-pixel-res}asec'
+                padding: 1.2
+                # use-gridder: true
+                gain: 0.15
+                mgain: 0.9
+                niter: 80000
+                weight: =root.weight
+                multiscale: false
+                multiscale-scales: [0, 3, 9]
+                threshold: 1e-6
+                auto-mask: 4.0
+                auto-threshold: 1.0
+                local-rms: true
+                no-dirty: false
+                make-psf: true
+                nchan: 1
+
+
+        predict-standard:
+            _use: lib.steps.imaging-standard
+            info: "predict model into MODEL_DATA"
+            params:
+                predict: true
+                column: MODEL{info.suffix}_DATA
+
+        flagging-standard:
+            info: "Flag automatically using tricolour"
+            cab: tricolour-tim
+            params:
+                config: white-belt-tricolor.yml
+                flagging-strategy: standard
+                data-column: DATA
+                subtract-model-column: MODEL_DATA
+                temporary-directory: =root.dirs.temp
+
+        quartical:
+            base:
+                cab: quartical
+                params:
+                    input_ms:
+                        group_by: [SCAN_NUMBER, FIELD_ID, DATA_DESC_ID]
+                        time_chunk: 36
+                        freq_chunk: 1024        # TODO move to config
+                    input_model:
+                        apply_p_jones: false
+                    solver:
+                        terms: [K]
+                        iter_recipe: [25]
+                        propagate_flags: true
+                        robust: false
+                    output:
+                        overwrite: true
+                        products: [corrected_data]
+                        columns: [CORRECTED_DATA]
+                        flags: true
+                        apply_p_jones_inv: false
+                    mad_flags:
+                        enable: true
+                        threshold_bl: 5
+                        threshold_global: 5
+                        max_deviation: 5
+                    dask:
+                        threads: 4
+                    K:
+                        time_interval: 1
+                        freq_interval: 0
+                        type: delay
+
+            k:
+                _use: lib.steps.quartical.base
+                params:
+                    input_ms:
+                        path: =recipe.ms
+                    input_model:
+                        recipe: MODEL_DATA
+                    solver:
+                        terms: [K]
+                        iter_recipe: [50]
+                        propagate_flags: true
+                        robust: false
+                    output:
+                        gain_directory: "{root.dir-out}/cal-{info.suffix}"
+                        log_directory: "{root.dir-out}/cal-{info.suffix}"
+                        overwrite: true
+                        products: [corrected_data]
+                        columns: =LIST("SELFCAL{info.suffix}_DATA")
+                        flags: true
+                        apply_p_jones_inv: false
+                    mad_flags:
+                        enable: false
+                        threshold_bl: 8
+                        threshold_global: 1000
+                        max_deviation: 1000
+                    K:
+                        time_interval: 1
+                        freq_interval: 0
+                        type: delay
+                        initial_estimate: false
+
+            k-de:
+                _use: lib.steps.quartical.k
+                params:
+                    input_model:
+                        recipe: MODEL{info.suffix}_DATA~DIR1_DATA:DIR1_DATA
+                    solver:
+                        terms: [K, dE]
+                        iter_recipe: [25, 25, 25, 25, 25]
+                    output:
+                        products: [corrected_residual]
+                        subtract_directions: [0, 1]
+                    dE:
+                        direction_dependent: true
+                        time_interval: 16
+                        freq_interval: 128
+                        type: complex
+
+            k-de-tec:
+                _use: lib.steps.quartical.k-de
+                params:
+                    solver:
+                        terms: [K, dK, TEC, dE]
+                        iter_recipe:
+                            [25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25]
+                    TEC:
+                        direction_dependent: true
+                        time_interval: 1
+                        freq_interval: 0
+                        type: tec
+                    dK:
+                        direction_dependent: true
+                        time_interval: 1
+                        freq_interval: 0
+                        type: delay
+                        initial_estimate: false
+
+            k-g-de:
+                _use: lib.steps.quartical.k-de
+                params:
+                    solver:
+                        terms: [K, G, dE]
+                        iter_recipe: [25, 25, 25, 25, 25, 25, 25]
+                    G:
+                        time_interval: 1
+                        freq_interval: 0
+                        type: diag_complex
+
+        ddfacet:
+            base:
+                cab: ddfacet
+                params:
+                    Data:
+                        # MS: =recipe.ms
+                        # ColName: CORRECTED_DATA
+                        ChunkHours: 0.5
+                        Sort: true
+                    # Selection:
+                        # Field: 0
+                        # DDID: 0
+                    # Predict:
+                        # ColName: ''     # MODEL_DATA or leave empty to disable predict
+                        # InitDicoModel: ''
+                    Output:
+                        # Name: =recipe.image-prefix
+                        Also: 'oenNS'
+                        Images: 'DdPMmRrIikz' # add 'A' to re-include spectral index map
+                        Cubes: 'MmRi' # output intrinsic and apparent resid and model cubes
+                    Image:
+                        Cell: =root.image-pixel-res
+                    Facets:
+                        DiamMax: 0.3
+                        DiamMin: 0.03
+                        NFacets: 4 # crank this up (32?) to get better beam resolution if FITS beam is used
+                        PSFOversize: 1.5
+                        Padding: 3.0 # padding needs increasing from default if NFacets is raised to prevent aliasing
+                    Weight:
+                        Robust: -0.3
+                    CF:
+                        Nw: 100  # Increase for strong off-axis sources
+                    # Comp:
+                    #     Sparsification: '0'
+                    Parallel:
+                        NCPU: 12
+                    Cache:
+                        Dir: =root.ddf-cache
+                        # HMP: true
+                        # Reset: true
+
+                    # # [Data]
+                    # DDF_DDID = 'D*'
+                    # DDF_FIELD = 'F0'
+                    # DDF_COLNAME = 'CORRECTED_DATA'
+                    # DDF_CHUNKHOURS = 0.5
+                    # DDF_DATASORT = 1
+                    # # [Predict]
+                    # DDF_PREDICTCOLNAME = '' # MODEL_DATA or leave empty to disable predict
+                    # DDF_INITDICOMODEL = ''
+                    # # [Output]
+                    # DDF_OUTPUTALSO = 'oenNS'
+                    # DDF_OUTPUTIMAGES = 'DdPMmRrIikz' # add 'A' to re-include spectral index map
+                    # DDF_OUTPUTCUBES = 'MmRi' # output intrinsic and apparent resid and model cubes
+                    # # [Image]
+                    # DDF_NPIX = 10125
+                    # DDF_CELL = 1.1
+                    # # [Facets]
+                    # DDF_DIAMMAX = 0.25
+                    # DDF_DIAMMIN = 0.05
+                    # DDF_NFACETS = 4 # crank this up (32?) to get better beam resolution if FITS beam is used
+                    # DDF_PSFOVERSIZE = 1.5
+                    # DDF_PADDING = 3.0 # padding needs increasing from default if NFacets is raised to prevent aliasing
+                    # # [Weight]
+                    # DDF_ROBUST = 0.0
+                    # # [Convolution Functions]
+                    # # DDF_NW = 100 # Increase for strong off-axis sources
+                    # # [Comp]
+                    # DDF_SPARSIFICATION = '0' # [100,30,10] grids every 100th visibility on major cycle 1, every 30th on cycle 2, etc.
+                    # # [Parallel]
+                    # DDF_NCPU = 8
+                    # # [Cache]
+                    # DDF_CACHERESET = 0
+                    # DDF_CACHEDIR = '.'
+                    # DDF_CACHEHMP = 1
+
+                    # Beam:
+                    #     Model: None # see below to specify a model
+                    Beam:
+                        Model: FITS
+                        FITSFile: =root.ddf-beam-models
+                        NBand: 20       # Num channes over which to use the same beam model
+                        DtBeamMin: 1
+                        FITSParAngleIncDeg: 0.5
+                        FITSFeedSwap: true
+                        FITSFeed: xy
+                        ApplyPJones: true
+                        FlipVisibilityHands: true
+                        CenterNorm: true
+                        Smooth: 1
+                        FITSLAxis: -px
+                        FITSMAxis: -py
+                    Freq:
+                        NBand: 3
+                        NDegridBand: 10
+                    # DDESolutions:
+                    #     DDSols: ''
+                    #     DDModeGrid: 'AP'
+                    #     DDModeDeGrid: 'AP'
+                    # # [Beam]
+                    # DDF_BEAM = '' # specify beam cube of the form: meerkat_pb_jones_cube_95channels_$(xy)_$(reim).fits
+                    # DDF_BEAMNBAND= 10
+                    # DDF_DTBEAMMIN = 1
+                    # DDF_FITSPARANGLEINCDEG = 0.5
+                    # DDF_BEAMCENTRENORM = True
+                    # DDF_FEEDSWAP = 1
+                    # DDF_BEAMSMOOTH = False
+                    # # [Freq]
+                    # DDF_NBAND = 8
+                    # DDF_NDEGRIDBAND = 8
+                    # # [DDESolutions]
+                    # DDF_DDSOLS = ''
+                    # DDF_DDMODEGRID = 'AP'
+                    # DDF_DDMODEDEGRID = 'AP'
+
+                    Debug:
+                        MemoryGreedy: false   # Save RAM
+                        APPVerbose: true
+                        Pdb: auto
+                    Log:
+                        Memory: true
+                        Boring: true
+
+                    GAClean:
+                        ParallelInitHMP: false
+                        NCPU: 2     # Reduce memory pressure.
+                    Deconv:
+                        Gain: 0.15
+                        FluxThreshold: 3e-6
+                        CycleFactor: 0
+                        RMSFactor: 3.0
+                        Mode: HMP   # Was Hogbom
+                        PeakFactor: 0.1
+                        MaxMajorIter: 5
+                        MaxMinorIter: 100000
+                    Hogbom:
+                        PolyFitOrder: 4
+                    # # [Deconv]
+                    # DDF_GAIN = 0.15
+                    # DDF_FLUXTHRESHOLD = 3e-6
+                    # DDF_CYCLEFACTOR = 0
+                    # DDF_RMSFACTOR = 3.0
+                    # DDF_DECONVMODE = 'hogbom'
+                    # DDF_SSD_DECONVPEAKFACTOR = 0.001
+                    # DDF_SSD_MAXMAJORITER = 3
+                    # DDF_SSD_MAXMINORITER = 120000
+                    # DDF_SSD_ENLARGEDATA = 0
+                    # DDF_HOGBOM_DECONVPEAKFACTOR = 0.1
+                    # DDF_HOGBOM_MAXMAJORITER = 5
+                    # DDF_HOGBOM_MAXMINORITER = 100000
+                    # DDF_HOGBOM_POLYFITORDER = 4
+                    # Mask:
+                    #     Auto: true   # Mask.External is supplied
+                    #     SigTh: 4.5
+                    Misc:
+                        ConserveMemory: true
+                    # # [Mask]
+                    # DDF_MASK = 'auto' # 'auto' enables automasking
+                    #                   # 'fits' uses the first *.mask.fits in the current folder
+                    #                   # otherwise pass a filename to use a specific FITS image
+                    # # [Misc]
+                    # DDF_MASKSIGMA = 4.5
+                    # DDF_CONSERVEMEMORY = 1
+                    RIME.DecorrMode: FT     # From OMS
+
+
+            ssd2:
+                params:
+                Mask.Auto: false
+#  - 05:56:34 - ClassFacetMachineTessel      [0.2/0.3 0.9/1.1 0.0Gb] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#  - 05:56:34 - ClassFacetMachineTessel      [0.2/0.3 0.9/1.1 0.0Gb] !!! The following parameters are different in kMS/DDF, and you may think whether this has an effect or not...
+#  - 05:56:34 - ClassFacetMachineTessel      [0.2/0.3 0.9/1.1 0.0Gb] !!! kMS parameter [[Beam][NChanBeamPerMS] = 1] differs from DDF [[Beam][NBand] = 0]
+#  - 05:56:34 - ClassFacetMachineTessel      [0.2/0.3 0.9/1.1 0.0Gb] !!! kMS parameter [[Beam][CenterNorm] = True] differs from DDF [[Beam][CenterNorm] = False]
+#  - 05:56:34 - ClassFacetMachineTessel      [0.2/0.3 0.9/1.1 0.0Gb] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        killms:
+            base:
+                cab: killms
+                params:
+                    Weighting: Natural
+                    PolMode: Scalar
+                    # # [VisData]
+                    # KMS_TCHUNK = 0.5
+                    # KMS_INCOL = 'CORRECTED_DATA'
+                    # KMS_OUTCOL = 'MODEL_DATA'
+                    InCol: CORRECTED_DATA
+                    OutCol: MODEL_DATA
+                    TChunk: 0.5
+                    DDFCacheDir: =root.ddf-cache
+                    # # [Beam]
+                    # KMS_BEAM = ''
+                    # KMS_BEAMAT = 'Facet'
+                    # KMS_DTBEAMMIN = 1
+                    # KMS_CENTRENORM = 1
+                    # KMS_NCHANBEAMPERMS = 95
+                    # KMS_FITSPARANGLEINCDEG = 0.5
+                    # KMS_FITSFEEDSWAP = 1
+                    # BeamModel: None
+                    BeamModel: FITS
+                    FITSFile: =root.ddf-beam-models
+                    BeamAt: 'Facet'
+                    DtBeamMin: 1.0
+                    CenterNorm: 1.0
+                    # NChanBeamPerMS: 95
+                    FITSParAngleIncDeg: 0.5
+                    FITSFeedSwap: 1
+                    FITSLAxis: -px
+                    FITSMAxis: -py
+
+                    # # [ImageSkyModel]
+                    # KMS_DICOMODEL = ''
+                    # KMS_MAXFACETSIZE = 0.25
+                    # DicoModel: '' if DicoModel != ''
+                    MaxFacetSize: 0.25
+                    # # [DataSelection]
+                    # KMS_UVMINMAX = '0.15,8500.0'
+                    # KMS_FIELDID = 0
+                    # KMS_DDID = 0
+                    UVMinMax: '0.15,8.5'
+                    FieldID: 0
+                    DDID: 0
+                    # # [Actions]
+                    # KMS_NCPU = 16
+                    # KMS_DOBAR = 0
+                    # KMS_DEBUGPDB = 0
+                    # NCPU: 12
+                    DoBar: true
+                    DebugPdb: 0
+                    # # [Solvers]
+                    # KMS_SOLVERTYPE = 'KAFCA' # or 'CohJones', note case sensitivity
+                    # KMS_DT = 5
+                    # KMS_NCHANSOLS = 8
+                    SolverType: =root.killms-solvertype
+                    dt: 5
+                    NChanSols: 4
+                    # # [KAFCA]
+                    # KMS_NITERKF = 9
+                    # KMS_COVQ = 0.05
+                    NIterKF: 9
+                    CovQ: 0.05
